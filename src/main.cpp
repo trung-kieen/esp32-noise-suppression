@@ -53,31 +53,34 @@
 #define LED_BUILTIN_PIN 38 // NeoPixel pin on ESP32S3
 #define NUM_PIXELS 1       // Number of NeoPixels
 
-Adafruit_NeoPixel inbuilt_led(NUM_PIXELS, LED_BUILTIN_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel LED_RGB(NUM_PIXELS, LED_BUILTIN_PIN, NEO_GRB + NEO_KHZ800);
+int counter = 0;
 
-void setup()
-{
-  // Initialize serial communication at 115200 bits per second:
-  Serial.begin(115200);
-  while (!Serial)
-  {
-    delay(10);
-  }
 
-  inbuilt_led.begin();
-  inbuilt_led.setBrightness(5); // Set brightness to 5% (0 to 255)
+void setup() {
+  LED_RGB.begin();
+  LED_RGB.setBrightness(150);
 }
+
+
 
 void loop()
 {
-  printf("*");
-  inbuilt_led.clear(); // Clear the NeoPixel
-  inbuilt_led.show();
-  Serial.println("OFF");
-  delay(500); // Wait for 500 milliseconds
+  LED_RGB.setPixelColor(0, uint32_t(LED_RGB.Color(255, 0, 0))); // red
+  LED_RGB.show();
+  delay(2000);
 
-  inbuilt_led.setPixelColor(0, inbuilt_led.Color(255, 0, 0)); // Set NeoPixel color (Red)
-  inbuilt_led.show();
-  Serial.println("ON");
-  delay(500); // Wait for 500 milliseconds
+
+  LED_RGB.setPixelColor(0, uint32_t(LED_RGB.Color(0, 255, 0))); // green
+  LED_RGB.show();
+  delay(2000);
+
+
+
+  LED_RGB.setPixelColor(0, uint32_t(LED_RGB.Color(0, 0, 255))); // blue
+  LED_RGB.show();
+  delay(2000);
+  counter++;
+  printf("%d\n", counter);
+
 }
