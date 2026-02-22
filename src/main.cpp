@@ -1,13 +1,14 @@
 /*
  * Real-Time Noise Suppression — ESP32-S3
- * Phase 1: I2S mic input (INMP441) + WebSocket sender
+ * Optimized: binary WebSocket frames (no base64, no JSON for audio)
  *
- * Architecture:
- *   Task 1 (AudioInput)   → reads 480 samples from INMP441 via I2S
- *   Task 2 (WSSender)     → encodes PCM as base64, sends JSON via WebSocket
+ * Binary frame layout (964 bytes total):
+ *   [0]     magic    = 0xAA
+ *   [1]     type     = 0x01 (audio_frame)
+ *   [2..3]  vad_prob as uint16 (0..10000 = 0.0..1.0)
+ *   [4..963] raw PCM  int16 × 480 samples = 960 bytes
  *
- * NOTE: RNNoise denoising is stubbed out — audio_clean = audio_raw for now.
- *       Replace the stub section with rnnoise_process_frame() in Phase 2.
+ * Handshake is still JSON text (sent once at connect).
  */
 
 #include <Arduino.h>
@@ -17,103 +18,95 @@
 #include <driver/i2s.h>
 
 // ─────────────────────────────────────────────
-//  WiFi credentials — CHANGE THESE
+//  CONFIG
 // ─────────────────────────────────────────────
-#define WIFI_SSID     "NothingMore"
-#define WIFI_PASSWORD "12345asdf"
-
-// Python server address — CHANGE THIS
-#define SERVER_HOST   "192.168.1.100"
-#define SERVER_PORT   8765
-#define SERVER_PATH   "/ws/esp32"
+#define WIFI_SSID  "NothingMore"
+#define WIFI_PASSWORD   "12345asdf"
+#define SERVER_HOST     "10.19.165.77"
+#define SERVER_PORT     8765
+#define SERVER_PATH     "/ws/esp32"
 
 // ─────────────────────────────────────────────
-//  I2S pins (INMP441)
-//  Match your report's pin mapping
+//  I2S — INMP441
 // ─────────────────────────────────────────────
 #define I2S_PORT        I2S_NUM_0
-#define I2S_SCK_PIN     4   // Bit Clock
-#define I2S_WS_PIN      5   // Word Select (LRCK)
-#define I2S_SD_PIN      6   // Data In
+#define I2S_SCK_PIN     4
+#define I2S_WS_PIN      5
+#define I2S_SD_PIN      6
 
 // ─────────────────────────────────────────────
-//  Audio config — RNNoise requires 48kHz / 480 samples
+//  Audio
 // ─────────────────────────────────────────────
-#define SAMPLE_RATE     48000
-#define FRAME_SAMPLES   480           // 10ms @ 48kHz
-#define BYTES_PER_FRAME (FRAME_SAMPLES * sizeof(int16_t))
+#define SAMPLE_RATE      48000
+#define FRAME_SAMPLES    480
+#define BYTES_PCM        (FRAME_SAMPLES * sizeof(int16_t))   // 960 bytes
 
 // ─────────────────────────────────────────────
-//  FreeRTOS queue: AudioInput → WSSender
-//  Each item is one full frame (480 × int16)
+//  Binary frame header
 // ─────────────────────────────────────────────
-#define QUEUE_DEPTH     8   // buffer up to 8 frames
+#define FRAME_MAGIC      0xAA
+#define FRAME_TYPE_AUDIO 0x01
+#define HEADER_SIZE      4
+#define BINARY_FRAME_SIZE (HEADER_SIZE + BYTES_PCM)          // 964 bytes
+
+// ─────────────────────────────────────────────
+//  Queue
+// ─────────────────────────────────────────────
+#define QUEUE_DEPTH  16   // increased from 8 since items are the same size
 
 typedef struct {
     int16_t raw[FRAME_SAMPLES];
-    int16_t clean[FRAME_SAMPLES];
     float   vad_prob;
 } AudioFrame_t;
 
-static QueueHandle_t audioQueue = nullptr;
+static QueueHandle_t     s_audioQueue    = nullptr;
+static WebSocketsClient  s_wsClient;
+static volatile bool     s_wsConnected   = false;
+static volatile uint32_t s_framesSent    = 0;
+static volatile uint32_t s_framesDropped = 0;
 
-// ─────────────────────────────────────────────
-//  WebSocket client (global)
-// ─────────────────────────────────────────────
-static WebSocketsClient wsClient;
-static volatile bool    wsConnected = false;
-
-// ─────────────────────────────────────────────
-//  Base64 encoding table
-// ─────────────────────────────────────────────
-static const char b64chars[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static String base64Encode(const uint8_t* data, size_t len) {
-    String out;
-    out.reserve(((len + 2) / 3) * 4 + 1);
-    for (size_t i = 0; i < len; i += 3) {
-        uint8_t b0 = data[i];
-        uint8_t b1 = (i + 1 < len) ? data[i + 1] : 0;
-        uint8_t b2 = (i + 2 < len) ? data[i + 2] : 0;
-        out += b64chars[(b0 >> 2) & 0x3F];
-        out += b64chars[((b0 << 4) | (b1 >> 4)) & 0x3F];
-        out += (i + 1 < len) ? b64chars[((b1 << 2) | (b2 >> 6)) & 0x3F] : '=';
-        out += (i + 2 < len) ? b64chars[b2 & 0x3F] : '=';
-    }
-    return out;
-}
+// Static buffers — off the task stack
+static int32_t  s_dmaBuffer[FRAME_SAMPLES];
+static int16_t  s_pcm16[FRAME_SAMPLES];
+static uint8_t  s_txBuf[BINARY_FRAME_SIZE];   // reused every send
 
 // ─────────────────────────────────────────────
 //  WebSocket event handler
 // ─────────────────────────────────────────────
 void onWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
     switch (type) {
+
         case WStype_CONNECTED:
-            wsConnected = true;
-            Serial.println("[WS] Connected to server");
-            // Send handshake
+            s_wsConnected = true;
+            printf("[WS] ✓ Connected to ws://%s:%d%s\n",
+                   SERVER_HOST, SERVER_PORT, SERVER_PATH);
             {
+                // Handshake: tell server our format (JSON text, once)
                 StaticJsonDocument<256> doc;
                 doc["type"]        = "handshake";
                 doc["sample_rate"] = SAMPLE_RATE;
                 doc["frame_size"]  = FRAME_SAMPLES;
+                doc["encoding"]    = "binary";   // <-- server knows to expect binary
                 doc["ai_model"]    = "rnnoise_stub";
                 String msg;
                 serializeJson(doc, msg);
-                wsClient.sendTXT(msg);
-                Serial.println("[WS] Handshake sent");
+                s_wsClient.sendTXT(msg);
+                printf("[WS] Handshake sent (binary mode)\n");
             }
             break;
 
         case WStype_DISCONNECTED:
-            wsConnected = false;
-            Serial.println("[WS] Disconnected");
+            s_wsConnected = false;
+            printf("[WS] ✗ Disconnected — retrying in 2s\n");
+            printf("[WS]   sent=%lu dropped=%lu\n", s_framesSent, s_framesDropped);
+            break;
+
+        case WStype_ERROR:
+            printf("[WS] ERROR len=%d\n", (int)length);
             break;
 
         case WStype_TEXT:
-            // Optionally handle ACK from server
-            Serial.printf("[WS] Server: %s\n", payload);
+            printf("[WS] Server: %.*s\n", (int)length, payload);
             break;
 
         default:
@@ -122,116 +115,128 @@ void onWebSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
 }
 
 // ─────────────────────────────────────────────
-//  Task 1 — AudioInput
-//  Reads FRAME_SAMPLES from I2S every ~10ms
-//  Packs into AudioFrame_t and sends to queue
+//  Task 1 — AudioInput (Core 1, priority 5)
 // ─────────────────────────────────────────────
-
-// Static buffers — keep OFF the task stack to avoid overflow
-static int32_t  s_dmaBuffer[FRAME_SAMPLES];
-static int16_t  s_pcm16[FRAME_SAMPLES];
-
 void taskAudioInput(void* pvParam) {
-    int32_t* dmaBuffer = s_dmaBuffer;
-    int16_t* pcm16     = s_pcm16;
-    size_t   bytesRead = 0;
+    printf("[AudioInput] Started on core %d | frame=%d samples, %d bytes\n",
+           xPortGetCoreID(), FRAME_SAMPLES, (int)BYTES_PCM);
 
-    Serial.println("[AudioInput] Task started");
+    size_t   bytesRead  = 0;
+    uint32_t frameCount = 0;
+    uint32_t errCount   = 0;
 
     while (true) {
-        // Read one frame from I2S DMA
-        esp_err_t err = i2s_read(
-            I2S_PORT,
-            dmaBuffer,
-            FRAME_SAMPLES * sizeof(int32_t),
-            &bytesRead,
-            portMAX_DELAY
-        );
-
+        esp_err_t err = i2s_read(I2S_PORT, s_dmaBuffer,
+                                 FRAME_SAMPLES * sizeof(int32_t),
+                                 &bytesRead, portMAX_DELAY);
         if (err != ESP_OK) {
-            Serial.printf("[AudioInput] i2s_read error: %d\n", err);
+            errCount++;
+            printf("[AudioInput] ✗ i2s_read err=%d (total=%lu)\n", err, errCount);
             continue;
         }
 
-        int samplesRead = bytesRead / sizeof(int32_t);
+        int n = bytesRead / sizeof(int32_t);
 
-        // INMP441 outputs 24-bit data left-justified in 32-bit words
-        // Shift right by 8 to get signed 24-bit, then scale to 16-bit
-        for (int i = 0; i < samplesRead; i++) {
-            pcm16[i] = (int16_t)(dmaBuffer[i] >> 11);
+        // INMP441: 24-bit left-justified in 32-bit → scale to 16-bit
+        for (int i = 0; i < n; i++) {
+            s_pcm16[i] = (int16_t)(s_dmaBuffer[i] >> 11);
         }
 
-        // ── RNNoise stub ─────────────────────────────────
-        // TODO Phase 2: replace with rnnoise_process_frame()
-        // For now, clean = raw (passthrough)
+        // ── RNNoise stub ─────────────────────────────────────
+        // TODO Phase 2: rnnoise_process_frame(rnn, out_f, in_f)
         AudioFrame_t frame;
-        memcpy(frame.raw,   pcm16, BYTES_PER_FRAME);
-        memcpy(frame.clean, pcm16, BYTES_PER_FRAME);  // stub
-        frame.vad_prob = 0.0f;                        // stub
-        // ──────────────────────────────────────────────────
+        memcpy(frame.raw, s_pcm16, BYTES_PCM);
+        frame.vad_prob = 0.0f;
+        // ─────────────────────────────────────────────────────
 
-        // Send to queue (drop frame if queue full — no blocking)
-        if (xQueueSend(audioQueue, &frame, 0) != pdTRUE) {
-            // Queue full — WSSender is too slow; drop this frame
+        if (xQueueSend(s_audioQueue, &frame, 0) != pdTRUE) {
+            s_framesDropped++;
+            if (s_framesDropped % 500 == 1) {
+                printf("[AudioInput] ⚠ Queue full — dropped=%lu queue=%lu/%d\n",
+                       s_framesDropped,
+                       (unsigned long)uxQueueMessagesWaiting(s_audioQueue),
+                       QUEUE_DEPTH);
+            }
+        }
+
+        frameCount++;
+        if (frameCount % 1000 == 0) {
+            printf("[AudioInput] ✓ %lu frames | queue=%lu/%d | dropped=%lu\n",
+                   frameCount,
+                   (unsigned long)uxQueueMessagesWaiting(s_audioQueue),
+                   QUEUE_DEPTH,
+                   s_framesDropped);
         }
     }
 }
 
 // ─────────────────────────────────────────────
-//  Task 2 — WSSender
-//  Picks frames from queue, encodes to JSON, sends over WebSocket
+//  Task 2 — WSSender (Core 0, priority 3)
+//  Sends raw binary frames — no base64, no JSON
 // ─────────────────────────────────────────────
 void taskWSSender(void* pvParam) {
+    printf("[WSSender] Started on core %d | tx_buf=%d bytes\n",
+           xPortGetCoreID(), BINARY_FRAME_SIZE);
+
     AudioFrame_t frame;
-    Serial.println("[WSSender] Task started");
-    printf("\n[WSSender] Task started");
+    uint32_t tLastLog = millis();
 
     while (true) {
-        // Block until a frame is available
-        if (xQueueReceive(audioQueue, &frame, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(s_audioQueue, &frame, pdMS_TO_TICKS(100)) != pdTRUE) {
             continue;
         }
 
-        if (!wsConnected) {
-            continue;   // discard frames when not connected
+        if (!s_wsConnected) continue;
+
+        // Build binary frame: [magic][type][vad_hi][vad_lo][pcm × 480]
+        uint16_t vad_u16 = (uint16_t)(frame.vad_prob * 10000.0f);
+        s_txBuf[0] = FRAME_MAGIC;
+        s_txBuf[1] = FRAME_TYPE_AUDIO;
+        s_txBuf[2] = (vad_u16 >> 8) & 0xFF;
+        s_txBuf[3] = vad_u16 & 0xFF;
+        memcpy(s_txBuf + HEADER_SIZE, frame.raw, BYTES_PCM);
+
+        bool ok = s_wsClient.sendBIN(s_txBuf, BINARY_FRAME_SIZE);
+        if (ok) {
+            s_framesSent++;
+            // Log throughput every second
+            uint32_t now = millis();
+            if (now - tLastLog >= 1000) {
+                printf("[WSSender] ✓ %lu frames sent | heap=%lu | "
+                       "queue=%lu/%d | dropped=%lu\n",
+                       s_framesSent,
+                       (unsigned long)ESP.getFreeHeap(),
+                       (unsigned long)uxQueueMessagesWaiting(s_audioQueue),
+                       QUEUE_DEPTH,
+                       s_framesDropped);
+                tLastLog = now;
+            }
+        } else {
+            printf("[WSSender] ✗ sendBIN failed (frame %lu)\n", s_framesSent);
         }
-
-        // Encode raw and clean PCM as base64
-        String rawB64   = base64Encode((uint8_t*)frame.raw,   BYTES_PER_FRAME);
-        String cleanB64 = base64Encode((uint8_t*)frame.clean, BYTES_PER_FRAME);
-
-        // Build JSON message
-        // Use DynamicJsonDocument — frame is ~1280 bytes of b64 each side
-        DynamicJsonDocument doc(4096);
-        doc["type"]                  = "audio_frame";
-        doc["audio_raw"]             = rawB64;
-        doc["audio_clean"]           = cleanB64;
-        doc["metrics"]["vad_prob"]   = frame.vad_prob;
-
-        String msg;
-        serializeJson(doc, msg);
-        wsClient.sendTXT(msg);
     }
 }
 
 // ─────────────────────────────────────────────
-//  I2S Initialization — INMP441, 48kHz, mono
+//  I2S init
 // ─────────────────────────────────────────────
 void initI2S() {
+    printf("[I2S] Init — rate=%d SCK=%d WS=%d SD=%d\n",
+           SAMPLE_RATE, I2S_SCK_PIN, I2S_WS_PIN, I2S_SD_PIN);
+
     i2s_config_t cfg = {
         .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
         .sample_rate          = SAMPLE_RATE,
         .bits_per_sample      = I2S_BITS_PER_SAMPLE_32BIT,
-        .channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT,   // INMP441 L/R pin → GND = left
+        .channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count        = 4,
+        .dma_buf_count        = 8,      // increased for smoother DMA
         .dma_buf_len          = FRAME_SAMPLES,
         .use_apll             = false,
         .tx_desc_auto_clear   = false,
         .fixed_mclk           = 0
     };
-
     i2s_pin_config_t pins = {
         .bck_io_num   = I2S_SCK_PIN,
         .ws_io_num    = I2S_WS_PIN,
@@ -242,89 +247,62 @@ void initI2S() {
     ESP_ERROR_CHECK(i2s_driver_install(I2S_PORT, &cfg, 0, nullptr));
     ESP_ERROR_CHECK(i2s_set_pin(I2S_PORT, &pins));
     ESP_ERROR_CHECK(i2s_zero_dma_buffer(I2S_PORT));
-
-    Serial.println("[I2S] INMP441 initialized @ 48kHz");
-    printf("\n[I2S] INMP441 initialized @ 48kHz");
+    printf("[I2S] ✓ Ready\n");
 }
 
 // ─────────────────────────────────────────────
-//  WiFi connect (blocking)
+//  WiFi
 // ─────────────────────────────────────────────
 void connectWiFi() {
-    printf("[WiFi] Connecting to %s", WIFI_SSID);
-    Serial.printf("[WiFi] Connecting to %s", WIFI_SSID);
+    printf("[WiFi] Connecting to: %s\n", WIFI_SSID);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED) {
+        if (millis() - start > 30000) {
+            printf("[WiFi] ✗ Timeout — restarting\n");
+            delay(2000); ESP.restart();
+        }
         delay(500);
-        Serial.print(".");
+        printf("[WiFi] ... status=%d\n", (int)WiFi.status());
     }
-    Serial.printf("\n[WiFi] Connected — IP: %s\n", WiFi.localIP().toString().c_str());
-    printf("\n[WiFi] Connected — IP: %s\n", WiFi.localIP().toString().c_str());
+    printf("[WiFi] ✓ IP=%s RSSI=%d dBm\n",
+           WiFi.localIP().toString().c_str(), WiFi.RSSI());
 }
 
 // ─────────────────────────────────────────────
 //  setup()
 // ─────────────────────────────────────────────
 void setup() {
-
-    printf("Init setup");
     Serial.begin(115200);
     delay(1000);
-    Serial.println("\n=== ESP32-S3 RNNoise Sender ===");
-    printf("\n=== ESP32-S3 RNNoise Sender ===");
+    printf("\n========================================\n");
+    printf("  ESP32-S3 RNNoise Sender (binary mode)\n");
+    printf("  Heap: %lu  CPU: %d MHz\n",
+           (unsigned long)ESP.getFreeHeap(), ESP.getCpuFreqMHz());
+    printf("  Frame: %d bytes (was 2639 with JSON+base64)\n", BINARY_FRAME_SIZE);
+    printf("========================================\n\n");
 
-    // 1. WiFi
     connectWiFi();
 
-    // 2. WebSocket
-    wsClient.begin(SERVER_HOST, SERVER_PORT, SERVER_PATH);
-    wsClient.onEvent(onWebSocketEvent);
-    wsClient.setReconnectInterval(2000);
-    Serial.printf("[WS] Connecting to ws://%s:%d%s\n", SERVER_HOST, SERVER_PORT, SERVER_PATH);
-    printf("[WS] Connecting to ws://%s:%d%s\n", SERVER_HOST, SERVER_PORT, SERVER_PATH);
+    printf("[WS] → ws://%s:%d%s\n", SERVER_HOST, SERVER_PORT, SERVER_PATH);
+    s_wsClient.begin(SERVER_HOST, SERVER_PORT, SERVER_PATH);
+    s_wsClient.onEvent(onWebSocketEvent);
+    s_wsClient.setReconnectInterval(2000);
 
-    // 3. I2S
     initI2S();
 
-    // 4. Queue
-    audioQueue = xQueueCreate(QUEUE_DEPTH, sizeof(AudioFrame_t));
-    if (!audioQueue) {
-        Serial.println("[FATAL] Could not create audio queue!");
-        while (true) delay(1000);
-    }
+    s_audioQueue = xQueueCreate(QUEUE_DEPTH, sizeof(AudioFrame_t));
+    if (!s_audioQueue) { printf("[FATAL] Queue alloc failed\n"); while(1); }
+    printf("[Queue] depth=%d item=%d bytes\n",
+           QUEUE_DEPTH, (int)sizeof(AudioFrame_t));
 
-    // 5. Tasks
-    // AudioInput on Core 1 (high priority) — keep audio capture stable
-    xTaskCreatePinnedToCore(
-        taskAudioInput,
-        "AudioInput",
-        8192,   // increased: I2S driver overhead is significant
-        nullptr,
-        5,      // priority
-        nullptr,
-        1       // core 1
-    );
+    xTaskCreatePinnedToCore(taskAudioInput, "AudioInput", 8192, nullptr, 5, nullptr, 1);
+    xTaskCreatePinnedToCore(taskWSSender,   "WSSender",   8192, nullptr, 3, nullptr, 0);
 
-    // WSSender on Core 0 (lower priority, WiFi stack lives here too)
-    xTaskCreatePinnedToCore(
-        taskWSSender,
-        "WSSender",
-        8192,   // larger stack for JSON serialization
-        nullptr,
-        3,
-        nullptr,
-        0       // core 0
-    );
-
-    Serial.println("[Setup] Done — tasks running");
-    printf("\n[Setup] Done — tasks running");
+    printf("[Setup] ✓ Running — server at %s:%d\n\n", SERVER_HOST, SERVER_PORT);
 }
 
-// ─────────────────────────────────────────────
-//  loop() — just runs WebSocket loop
-// ─────────────────────────────────────────────
 void loop() {
-    // printf("\n");
-    wsClient.loop();
-    delay(1);   // yield to RTOS
+    s_wsClient.loop();
+    delay(1);
 }
