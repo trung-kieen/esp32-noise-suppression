@@ -4,6 +4,8 @@
  * Legacy driver/i2s.h — works on all IDF versions
  */
 
+
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebSocketsClient.h>
@@ -15,6 +17,20 @@
 #include "freertos/queue.h"
 #include "audio_config.h"
 #include "wifi_config.h"
+
+
+// #include <driver/i2s.h>
+
+#define I2S_WS   5
+#define I2S_SD   6
+#define I2S_SCK  4
+#define I2S_PORT I2S_NUM_0
+
+#define SAMPLE_RATE 16000
+#define BUFFER_LEN  16   // nhỏ => latency thấp
+
+int32_t samples[BUFFER_LEN];
+
 
 // ============================================================
 //  Logging macros — rich printf with timestamp + core + level
@@ -495,115 +511,164 @@ static void wifi_connect(void)
 // ============================================================
 //  setup()
 // ============================================================
-void setup(void)
-{
-    Serial.begin(115200);
-    delay(500);
+// void setup(void)
+// {
+//     Serial.begin(115200);
+//     delay(500);
 
-    Serial.println();
-    Serial.println("========================================");
-    Serial.println("   ESP32-S3 Audio Pipeline  v1.0");
-    Serial.println("========================================");
-    LOGI("BOOT", "Chip: ESP32-S3  Cores: %d  Flash: %luMB  PSRAM: %luKB",
-         ESP.getChipCores(),
-         ESP.getFlashChipSize() / (1024 * 1024),
-         ESP.getPsramSize() / 1024);
-    LOGI("BOOT", "Free heap at boot: %lu bytes", ESP.getFreeHeap());
-    LOGI("BOOT", "IDF version: %s", esp_get_idf_version());
+//     Serial.println();
+//     Serial.println("========================================");
+//     Serial.println("   ESP32-S3 Audio Pipeline  v1.0");
+//     Serial.println("========================================");
+//     LOGI("BOOT", "Chip: ESP32-S3  Cores: %d  Flash: %luMB  PSRAM: %luKB",
+//          ESP.getChipCores(),
+//          ESP.getFlashChipSize() / (1024 * 1024),
+//          ESP.getPsramSize() / 1024);
+//     LOGI("BOOT", "Free heap at boot: %lu bytes", ESP.getFreeHeap());
+//     LOGI("BOOT", "IDF version: %s", esp_get_idf_version());
 
-    // Compile-time frame size check
-    static_assert(sizeof(audio_ws_frame_t) == WS_FRAME_SIZE,
-                  "audio_ws_frame_t size mismatch — check struct padding!");
-    LOGI("BOOT", "Frame layout check: sizeof(audio_ws_frame_t) = %d bytes (expected %d) OK",
-         (int)sizeof(audio_ws_frame_t), WS_FRAME_SIZE);
+//     // Compile-time frame size check
+//     static_assert(sizeof(audio_ws_frame_t) == WS_FRAME_SIZE,
+//                   "audio_ws_frame_t size mismatch — check struct padding!");
+//     LOGI("BOOT", "Frame layout check: sizeof(audio_ws_frame_t) = %d bytes (expected %d) OK",
+//          (int)sizeof(audio_ws_frame_t), WS_FRAME_SIZE);
 
-    LOGI("BOOT", "Audio config: %d Hz  frame=%d samples (%d ms)  DMA bufs=%d",
-         SAMPLE_RATE, FRAME_SAMPLES,
-         FRAME_SAMPLES * 1000 / SAMPLE_RATE,
-         AUDIO_QUEUE_DEPTH);
+//     LOGI("BOOT", "Audio config: %d Hz  frame=%d samples (%d ms)  DMA bufs=%d",
+//          SAMPLE_RATE, FRAME_SAMPLES,
+//          FRAME_SAMPLES * 1000 / SAMPLE_RATE,
+//          AUDIO_QUEUE_DEPTH);
 
-    // Create queues
-    LOGI("BOOT", "Creating RTOS queues...");
-    audio_queue = xQueueCreate(AUDIO_QUEUE_DEPTH, sizeof(uint8_t));
-    ws_queue    = xQueueCreate(WS_QUEUE_DEPTH,    sizeof(ws_payload_t *));
-    dac_queue   = xQueueCreate(4,                 sizeof(ws_payload_t *));
+//     // Create queues
+//     LOGI("BOOT", "Creating RTOS queues...");
+//     audio_queue = xQueueCreate(AUDIO_QUEUE_DEPTH, sizeof(uint8_t));
+//     ws_queue    = xQueueCreate(WS_QUEUE_DEPTH,    sizeof(ws_payload_t *));
+//     dac_queue   = xQueueCreate(4,                 sizeof(ws_payload_t *));
 
-    if (!audio_queue || !ws_queue || !dac_queue) {
-        LOGE("BOOT", "Queue creation FAILED — not enough heap! Free=%lu", ESP.getFreeHeap());
-        while (1) delay(1000);
-    }
-    LOGI("BOOT", "Queues OK — audio:%d  ws:%d  dac:4",
-         AUDIO_QUEUE_DEPTH, WS_QUEUE_DEPTH);
+//     if (!audio_queue || !ws_queue || !dac_queue) {
+//         LOGE("BOOT", "Queue creation FAILED — not enough heap! Free=%lu", ESP.getFreeHeap());
+//         while (1) delay(1000);
+//     }
+//     LOGI("BOOT", "Queues OK — audio:%d  ws:%d  dac:4",
+//          AUDIO_QUEUE_DEPTH, WS_QUEUE_DEPTH);
 
-    // I2S
-    i2s_init();
+//     // I2S
+//     i2s_init();
 
-    // WiFi + WebSocket
-    wifi_connect();
+//     // WiFi + WebSocket
+//     wifi_connect();
 
-    LOGI("BOOT", "Starting WebSocket client...");
-    wsClient.begin(WS_SERVER_HOST, WS_SERVER_PORT, WS_SERVER_PATH);
-    wsClient.onEvent(ws_event);
-    wsClient.setReconnectInterval(500);
-    LOGI("BOOT", "WebSocket client started — reconnect interval=500ms");
+//     LOGI("BOOT", "Starting WebSocket client...");
+//     wsClient.begin(WS_SERVER_HOST, WS_SERVER_PORT, WS_SERVER_PATH);
+//     wsClient.onEvent(ws_event);
+//     wsClient.setReconnectInterval(500);
+//     LOGI("BOOT", "WebSocket client started — reconnect interval=500ms");
 
-    // Spawn tasks
-    LOGI("BOOT", "Spawning FreeRTOS tasks...");
-    BaseType_t r1 = xTaskCreatePinnedToCore(
-        task_audio_input,   "AudioIn",   4096, NULL, 6, NULL, 1);
-    BaseType_t r2 = xTaskCreatePinnedToCore(
-        task_audio_process, "AudioProc", 4096, NULL, 5, NULL, 0);
-    BaseType_t r3 = xTaskCreatePinnedToCore(
-        task_audio_output,  "AudioOut",  2048, NULL, 6, NULL, 1);
-    BaseType_t r4 = xTaskCreatePinnedToCore(
-        task_ws_sender,     "WSSend",    4096, NULL, 3, NULL, 0);
+//     // Spawn tasks
+//     LOGI("BOOT", "Spawning FreeRTOS tasks...");
+//     BaseType_t r1 = xTaskCreatePinnedToCore(
+//         task_audio_input,   "AudioIn",   4096, NULL, 6, NULL, 1);
+//     BaseType_t r2 = xTaskCreatePinnedToCore(
+//         task_audio_process, "AudioProc", 4096, NULL, 5, NULL, 0);
+//     BaseType_t r3 = xTaskCreatePinnedToCore(
+//         task_audio_output,  "AudioOut",  2048, NULL, 6, NULL, 1);
+//     BaseType_t r4 = xTaskCreatePinnedToCore(
+//         task_ws_sender,     "WSSend",    4096, NULL, 3, NULL, 0);
 
-    if (r1 != pdPASS || r2 != pdPASS || r3 != pdPASS || r4 != pdPASS) {
-        LOGE("BOOT", "Task creation FAILED  r1=%d r2=%d r3=%d r4=%d",
-             r1, r2, r3, r4);
-        LOGE("BOOT", "Free heap: %lu bytes", ESP.getFreeHeap());
-        while (1) delay(1000);
-    }
+//     if (r1 != pdPASS || r2 != pdPASS || r3 != pdPASS || r4 != pdPASS) {
+//         LOGE("BOOT", "Task creation FAILED  r1=%d r2=%d r3=%d r4=%d",
+//              r1, r2, r3, r4);
+//         LOGE("BOOT", "Free heap: %lu bytes", ESP.getFreeHeap());
+//         while (1) delay(1000);
+//     }
 
-    LOGI("BOOT", "All 4 tasks spawned:");
-    LOGI("BOOT", "  [T1] AudioIn   — core 1, priority 6");
-    LOGI("BOOT", "  [T2] AudioProc — core 0, priority 5");
-    LOGI("BOOT", "  [T3] AudioOut  — core 1, priority 6");
-    LOGI("BOOT", "  [T4] WSSend    — core 0, priority 3");
+//     LOGI("BOOT", "All 4 tasks spawned:");
+//     LOGI("BOOT", "  [T1] AudioIn   — core 1, priority 6");
+//     LOGI("BOOT", "  [T2] AudioProc — core 0, priority 5");
+//     LOGI("BOOT", "  [T3] AudioOut  — core 1, priority 6");
+//     LOGI("BOOT", "  [T4] WSSend    — core 0, priority 3");
 
-    Serial.println("========================================");
-    LOGI("BOOT", "Pipeline running — streaming to ws://%s:%d%s",
-         WS_SERVER_HOST, WS_SERVER_PORT, WS_SERVER_PATH);
-    Serial.println("========================================");
+//     Serial.println("========================================");
+//     LOGI("BOOT", "Pipeline running — streaming to ws://%s:%d%s",
+//          WS_SERVER_HOST, WS_SERVER_PORT, WS_SERVER_PATH);
+//     Serial.println("========================================");
+// }
+
+// // ============================================================
+// //  loop() — WebSocket keepalive + periodic health report
+// // ============================================================
+// static uint32_t last_health_ms = 0;
+
+// void loop(void)
+// {
+//     wsClient.loop();
+
+//     // Print health report every 5 seconds
+//     uint32_t now = millis();
+//     if (now - last_health_ms >= 5000) {
+//         last_health_ms = now;
+//         LOGI("HEALTH", "uptime=%lus  captured=%lu  sent=%lu  "
+//              "ws_overflow=%lu  dac_overflow=%lu  i2s_err=%lu  "
+//              "peak=%d  heap_free=%lu  wifi_rssi=%d dBm  ws=%s",
+//              now / 1000,
+//              stat_frames_captured,
+//              stat_frames_sent,
+//              stat_ws_overflow,
+//              stat_dac_overflow,
+//              stat_i2s_errors,
+//              (int)stat_last_peak,
+//              ESP.getFreeHeap(),
+//              WiFi.RSSI(),
+//              ws_connected ? "CONNECTED" : "DISCONNECTED");
+//     }
+
+//     delay(1);
+// }
+
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  i2s_config_t cfg = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+    .sample_rate = SAMPLE_RATE,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = I2S_COMM_FORMAT_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 4,
+    .dma_buf_len = BUFFER_LEN,
+    .use_apll = false,
+    .tx_desc_auto_clear = false,
+    .fixed_mclk = 0
+  };
+
+  i2s_pin_config_t pin = {
+    .bck_io_num = I2S_SCK,
+    .ws_io_num = I2S_WS,
+    .data_out_num = -1,
+    .data_in_num = I2S_SD
+  };
+
+  i2s_driver_install(I2S_PORT, &cfg, 0, NULL);
+  i2s_set_pin(I2S_PORT, &pin);
 }
 
-// ============================================================
-//  loop() — WebSocket keepalive + periodic health report
-// ============================================================
-static uint32_t last_health_ms = 0;
+void loop() {
+  size_t bytes_read = 0;
+  esp_err_t r = i2s_read(I2S_PORT, samples, sizeof(samples), &bytes_read, pdMS_TO_TICKS(2));
+  if (r != ESP_OK || bytes_read == 0) return;
 
-void loop(void)
-{
-    wsClient.loop();
+  int n = bytes_read / 4;
+  int32_t peak = 0;
+  for (int i = 0; i < n; i++) {
+    int32_t v = samples[i] >> 14;
+    int32_t a = (v < 0) ? -v : v;
+    if (a > peak) peak = a;
+  }
+  printf("\n%d", peak);
+  Serial.println(peak);
 
-    // Print health report every 5 seconds
-    uint32_t now = millis();
-    if (now - last_health_ms >= 5000) {
-        last_health_ms = now;
-        LOGI("HEALTH", "uptime=%lus  captured=%lu  sent=%lu  "
-             "ws_overflow=%lu  dac_overflow=%lu  i2s_err=%lu  "
-             "peak=%d  heap_free=%lu  wifi_rssi=%d dBm  ws=%s",
-             now / 1000,
-             stat_frames_captured,
-             stat_frames_sent,
-             stat_ws_overflow,
-             stat_dac_overflow,
-             stat_i2s_errors,
-             (int)stat_last_peak,
-             ESP.getFreeHeap(),
-             WiFi.RSSI(),
-             ws_connected ? "CONNECTED" : "DISCONNECTED");
-    }
-
-    delay(1);
+  // 200Hz update (đủ nhanh mà Serial không nghẽn)
+  delay(5);
 }
