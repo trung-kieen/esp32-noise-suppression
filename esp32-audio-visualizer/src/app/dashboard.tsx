@@ -3,6 +3,7 @@ import { WebSocketService } from '../core/websocket.service';
 import { VisualizationDTO } from '../core/dto.types';
 import { WaveformRenderer } from '../features/waveform/waveform.renderer';
 import { SpectrumRenderer } from '../features/spectrum/spectrum.renderer';
+import { BarkBandsRenderer } from '../features/bark-bands/bark-bands.renderer';
 import { VADHistoryRenderer } from '../features/vad-history/vad-history.renderer';
 import { MetricsPanel } from '../features/metrics/metrics.component';
 
@@ -11,10 +12,12 @@ const WS_URL = 'ws://localhost:8080/visualizer';
 export const AudioDashboard: React.FC = () => {
   const waveformRef = useRef<HTMLCanvasElement>(null);
   const spectrumRef = useRef<HTMLCanvasElement>(null);
+  const barkBandsRef = useRef<HTMLCanvasElement>(null);
   const vadHistoryRef = useRef<HTMLCanvasElement>(null);
 
   const waveformRenderer = useRef<WaveformRenderer | null>(null);
   const spectrumRenderer = useRef<SpectrumRenderer | null>(null);
+  const barkBandsRenderer = useRef<BarkBandsRenderer | null>(null);
   const vadHistoryRenderer = useRef<VADHistoryRenderer | null>(null);
   const wsService = useRef<WebSocketService | null>(null);
 
@@ -23,7 +26,6 @@ export const AudioDashboard: React.FC = () => {
   const [gain, setGain] = useState(1.0);
   const [autoScale, setAutoScale] = useState(true);
 
-  // Initialize renderers
   useEffect(() => {
     if (waveformRef.current && !waveformRenderer.current) {
       waveformRenderer.current = new WaveformRenderer(waveformRef.current);
@@ -31,12 +33,14 @@ export const AudioDashboard: React.FC = () => {
     if (spectrumRef.current && !spectrumRenderer.current) {
       spectrumRenderer.current = new SpectrumRenderer(spectrumRef.current);
     }
+    if (barkBandsRef.current && !barkBandsRenderer.current) {
+      barkBandsRenderer.current = new BarkBandsRenderer(barkBandsRef.current);
+    }
     if (vadHistoryRef.current && !vadHistoryRenderer.current) {
       vadHistoryRenderer.current = new VADHistoryRenderer(vadHistoryRef.current);
     }
   }, []);
 
-  // Update renderer settings
   useEffect(() => {
     if (waveformRenderer.current) {
       waveformRenderer.current.setGain(gain);
@@ -44,7 +48,6 @@ export const AudioDashboard: React.FC = () => {
     }
   }, [gain, autoScale]);
 
-  // Setup WebSocket
   useEffect(() => {
     wsService.current = new WebSocketService(
       WS_URL,
@@ -62,14 +65,25 @@ export const AudioDashboard: React.FC = () => {
     };
   }, []);
 
-  // Render loop using requestAnimationFrame
   useEffect(() => {
     let animationId: number;
 
     const render = () => {
       if (dto) {
-        waveformRenderer.current?.render(dto.rawWaveform, dto.cleanWaveform);
-        spectrumRenderer.current?.render(dto.rawSpectrum, dto.cleanSpectrum);
+        waveformRenderer.current?.render(
+          dto.waveform.raw,
+          dto.waveform.clean
+        );
+        spectrumRenderer.current?.render(
+          dto.spectrum.raw,
+          dto.spectrum.clean,
+          dto.spectrum.frequencies
+        );
+        barkBandsRenderer.current?.render(
+          dto.barkBands.raw,
+          dto.barkBands.clean,
+          dto.barkBands.bandEdges
+        );
         vadHistoryRenderer.current?.render();
       }
       animationId = requestAnimationFrame(render);
@@ -86,22 +100,27 @@ export const AudioDashboard: React.FC = () => {
     <div style={styles.container}>
       <header style={styles.header}>
         <h1 style={styles.title}>🔊 ESP32-S3 Audio Visualizer</h1>
-        <div style={styles.subtitle}>Real-time RNNoise Denoising Monitor | 48kHz | 40ms window</div>
+        <div style={styles.subtitle}>
+          Real-time RNNoise | 48kHz | Batch: 4×480 samples | 40ms window
+        </div>
       </header>
 
       <MetricsPanel
-        vad={dto?.vad ?? 0}
-        snr={dto?.snr ?? 0}
-        latencyMs={dto?.latencyMs ?? 0}
-        packetLoss={dto?.packetLoss ?? 0}
         batchSeq={dto?.batchSeq ?? 0}
-        peakRaw={dto?.peak_raw ?? 0}
-        rmsDb={dto?.rms_db ?? -60}
-        voiceDetected={dto?.voice_detected ?? false}
+        timestampMs={dto?.timestampMs ?? 0}
+        latencyMs={dto?.latencyMs ?? 0}
+        snr={dto?.snr ?? 0}
+        vad={dto?.vad ?? 0}
+        rmsRaw={dto?.rmsRaw ?? 0}
+        packetLoss={dto?.packetLoss ?? 0}
+        totalPacketLoss={dto?.totalPacketLoss}
+        connectionStatus={dto?.connectionStatus ?? 'offline'}
+        frameSeq={dto?.system?.frameSeq ?? 0}
+        serverProcessingMs={dto?.system?.serverProcessingMs ?? 0}
+        queueDepth={dto?.system?.queueDepth ?? 0}
         connected={connected}
       />
 
-      {/* Gain Control Panel */}
       <div style={styles.controls}>
         <label style={styles.controlLabel}>
           <input
@@ -110,7 +129,7 @@ export const AudioDashboard: React.FC = () => {
             onChange={(e) => setAutoScale(e.target.checked)}
             style={styles.checkbox}
           />
-          <span>Auto-scale (recommended for voice)</span>
+          <span>Auto-scale waveform (recommended for voice)</span>
         </label>
 
         {!autoScale && (
@@ -125,7 +144,7 @@ export const AudioDashboard: React.FC = () => {
               onChange={(e) => setGain(parseFloat(e.target.value))}
               style={styles.slider}
             />
-            <span style={styles.gainHint}>Use 10-30x for quiet voice</span>
+            <span style={styles.gainHint}>Use 10-30x for quiet voice at 1m</span>
           </div>
         )}
       </div>
@@ -135,24 +154,28 @@ export const AudioDashboard: React.FC = () => {
           <div style={styles.sectionHeader}>
             <span style={styles.sectionTitle}>Waveform</span>
             <span style={styles.sectionSubtitle}>
-              Time: 0-40ms | Amplitude: Auto-scaled to fill view
+              {dto?.waveform ? `${dto.waveform.durationMs}ms @ ${dto.waveform.sampleRate/1000}kHz` : 'Waiting...'}
             </span>
           </div>
-          <canvas
-            ref={waveformRef}
-            style={styles.canvas}
-          />
+          <canvas ref={waveformRef} style={styles.canvas} />
         </div>
 
         <div style={styles.section}>
           <div style={styles.sectionHeader}>
             <span style={styles.sectionTitle}>Frequency Spectrum</span>
-            <span style={styles.sectionSubtitle}>0-24kHz | Log magnitude scale</span>
+            <span style={styles.sectionSubtitle}>
+              {dto?.spectrum ? `FFT ${dto.spectrum.fftSize} | Hop ${dto.spectrum.hopLength}` : 'Waiting...'}
+            </span>
           </div>
-          <canvas
-            ref={spectrumRef}
-            style={styles.canvas}
-          />
+          <canvas ref={spectrumRef} style={styles.canvas} />
+        </div>
+
+        <div style={styles.halfSection}>
+          <div style={styles.sectionHeader}>
+            <span style={styles.sectionTitle}>Bark Bands (24 bands)</span>
+            <span style={styles.sectionSubtitle}>Psychoacoustic energy</span>
+          </div>
+          <canvas ref={barkBandsRef} style={styles.canvas} />
         </div>
 
         <div style={styles.vadSection}>
@@ -160,10 +183,7 @@ export const AudioDashboard: React.FC = () => {
             <span style={styles.sectionTitle}>Voice Activity History</span>
             <span style={styles.sectionSubtitle}>Last 4 seconds</span>
           </div>
-          <canvas
-            ref={vadHistoryRef}
-            style={{...styles.canvas, height: '60px'}}
-          />
+          <canvas ref={vadHistoryRef} style={{...styles.canvas, height: '60px'}} />
         </div>
       </div>
     </div>
@@ -195,7 +215,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   subtitle: {
     color: '#666',
-    fontSize: '14px',
+    fontSize: '13px',
     marginTop: '5px',
   },
   controls: {
@@ -229,7 +249,7 @@ const styles: Record<string, React.CSSProperties> = {
   gainLabel: {
     color: '#00ff88',
     fontWeight: 'bold',
-    minWidth: '100px',
+    minWidth: '120px',
   },
   slider: {
     width: '200px',
@@ -242,10 +262,11 @@ const styles: Record<string, React.CSSProperties> = {
   },
   visualizationContainer: {
     flex: 1,
-    display: 'flex',
-    flexDirection: 'column',
-    padding: '20px',
-    gap: '20px',
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gridTemplateRows: '1fr 1fr auto',
+    gap: '15px',
+    padding: '15px',
     overflow: 'auto',
   },
   section: {
@@ -253,10 +274,18 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '8px',
     border: '1px solid #333',
     overflow: 'hidden',
-    flex: 1,
-    minHeight: '200px',
     display: 'flex',
     flexDirection: 'column',
+    minHeight: '200px',
+  },
+  halfSection: {
+    backgroundColor: '#0a0a0a',
+    borderRadius: '8px',
+    border: '1px solid #333',
+    overflow: 'hidden',
+    display: 'flex',
+    flexDirection: 'column',
+    minHeight: '150px',
   },
   vadSection: {
     backgroundColor: '#0a0a0a',
@@ -264,9 +293,10 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #333',
     overflow: 'hidden',
     height: '80px',
+    gridColumn: '1 / -1',
   },
   sectionHeader: {
-    padding: '10px 15px',
+    padding: '8px 12px',
     backgroundColor: '#1a1a1a',
     borderBottom: '1px solid #333',
     display: 'flex',
@@ -274,14 +304,14 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
   },
   sectionTitle: {
-    fontSize: '14px',
+    fontSize: '13px',
     fontWeight: 'bold',
     color: '#fff',
     textTransform: 'uppercase',
     letterSpacing: '1px',
   },
   sectionSubtitle: {
-    fontSize: '11px',
+    fontSize: '10px',
     color: '#666',
     fontFamily: 'monospace',
   },
@@ -289,5 +319,6 @@ const styles: Record<string, React.CSSProperties> = {
     width: '100%',
     height: '100%',
     display: 'block',
+    flex: 1,
   },
 };

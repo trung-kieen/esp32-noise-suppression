@@ -2,29 +2,38 @@
 import React from 'react';
 
 interface MetricsProps {
-  vad: number;
-  snr: number;
-  latencyMs: number;
-  packetLoss: number;
   batchSeq: number;
-  peakRaw: number;
-  rmsDb: number;
-  voiceDetected: boolean;
+  timestampMs: number;
+  latencyMs: number;
+  snr: number;
+  vad: number;
+  rmsRaw: number;
+  packetLoss: number;
+  totalPacketLoss?: number;
+  connectionStatus: string;
+  frameSeq: number;
+  serverProcessingMs: number;
+  queueDepth: number;
   connected: boolean;
 }
 
 export const MetricsPanel: React.FC<MetricsProps> = ({
-  vad,
-  snr,
-  latencyMs,
-  packetLoss,
   batchSeq,
-  peakRaw,
-  rmsDb,
-  voiceDetected,
+  timestampMs,
+  latencyMs,
+  snr,
+  vad,
+  rmsRaw,
+  packetLoss,
+  totalPacketLoss,
+  connectionStatus,
+  frameSeq,
+  serverProcessingMs,
+  queueDepth,
   connected
 }) => {
   const formatDb = (val: number) => `${val.toFixed(1)} dB`;
+  const voiceDetected = vad > 0.5;
 
   return (
     <div style={styles.container}>
@@ -35,8 +44,9 @@ export const MetricsPanel: React.FC<MetricsProps> = ({
           ...styles.value,
           color: connected ? '#00ff88' : '#ff4444'
         }}>
-          {connected ? '🟢 Connected' : '🔴 Disconnected'}
+          {connected ? '🟢 Online' : '🔴 Offline'}
         </div>
+        <div style={styles.subtext}>{connectionStatus}</div>
       </div>
 
       {/* VAD */}
@@ -72,6 +82,13 @@ export const MetricsPanel: React.FC<MetricsProps> = ({
         </div>
       </div>
 
+      {/* RMS Raw */}
+      <div style={styles.metricBox}>
+        <div style={styles.label}>Input Level</div>
+        <div style={styles.value}>{rmsRaw.toFixed(4)}</div>
+        <div style={styles.subtext}>RMS Raw</div>
+      </div>
+
       {/* Latency */}
       <div style={styles.metricBox}>
         <div style={styles.label}>Latency</div>
@@ -81,7 +98,7 @@ export const MetricsPanel: React.FC<MetricsProps> = ({
         }}>
           {latencyMs.toFixed(0)} ms
         </div>
-        <div style={styles.subtext}>End-to-end</div>
+        <div style={styles.subtext}>Server: {serverProcessingMs.toFixed(1)}ms</div>
       </div>
 
       {/* Packet Loss */}
@@ -93,21 +110,23 @@ export const MetricsPanel: React.FC<MetricsProps> = ({
         }}>
           {packetLoss === 0 ? '0' : `⚠️ ${packetLoss}`}
         </div>
-        <div style={styles.subtext}>Lost batches</div>
+        <div style={styles.subtext}>
+          Total: {totalPacketLoss || 0}
+        </div>
       </div>
 
-      {/* Peak Level */}
+      {/* Batch Info */}
       <div style={styles.metricBox}>
-        <div style={styles.label}>Peak Level</div>
-        <div style={styles.value}>{peakRaw.toLocaleString()}</div>
-        <div style={styles.subtext}>{formatDb(rmsDb)} RMS</div>
+        <div style={styles.label}>Sequence</div>
+        <div style={styles.value}>#{batchSeq.toLocaleString()}</div>
+        <div style={styles.subtext}>Frame: {frameSeq.toLocaleString()}</div>
       </div>
 
-      {/* Batch Sequence */}
+      {/* Queue */}
       <div style={styles.metricBox}>
-        <div style={styles.label}>Batch #</div>
-        <div style={styles.value}>{batchSeq.toLocaleString()}</div>
-        <div style={styles.subtext}>Sequence</div>
+        <div style={styles.label}>Queue</div>
+        <div style={styles.value}>{queueDepth}</div>
+        <div style={styles.subtext}>Depth</div>
       </div>
     </div>
   );
@@ -116,16 +135,16 @@ export const MetricsPanel: React.FC<MetricsProps> = ({
 const styles: Record<string, React.CSSProperties> = {
   container: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
-    gap: '15px',
-    padding: '20px',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
+    gap: '12px',
+    padding: '15px',
     backgroundColor: '#0a0a0a',
     borderBottom: '1px solid #333',
   },
   metricBox: {
     backgroundColor: '#1a1a1a',
-    padding: '15px',
-    borderRadius: '8px',
+    padding: '12px',
+    borderRadius: '6px',
     border: '1px solid #333',
     display: 'flex',
     flexDirection: 'column',
@@ -134,52 +153,52 @@ const styles: Record<string, React.CSSProperties> = {
   },
   label: {
     color: '#888',
-    fontSize: '11px',
+    fontSize: '10px',
     textTransform: 'uppercase',
     letterSpacing: '1px',
-    marginBottom: '8px',
+    marginBottom: '6px',
     fontFamily: 'monospace',
   },
   value: {
     color: '#fff',
-    fontSize: '24px',
+    fontSize: '20px',
     fontWeight: 'bold',
     fontFamily: 'monospace',
   },
   subtext: {
     color: '#666',
-    fontSize: '10px',
+    fontSize: '9px',
     marginTop: '4px',
     fontFamily: 'monospace',
   },
   vadContainer: {
     width: '100%',
-    height: '20px',
+    height: '18px',
     backgroundColor: '#333',
-    borderRadius: '10px',
+    borderRadius: '9px',
     overflow: 'hidden',
     position: 'relative',
-    marginBottom: '5px',
+    marginBottom: '4px',
   },
   vadBar: {
     height: '100%',
     transition: 'width 0.1s ease-out, background-color 0.2s',
-    borderRadius: '10px',
+    borderRadius: '9px',
   },
   vadText: {
     position: 'absolute',
-    right: '8px',
+    right: '6px',
     top: '50%',
     transform: 'translateY(-50%)',
     color: '#fff',
-    fontSize: '11px',
+    fontSize: '10px',
     fontWeight: 'bold',
     textShadow: '0 1px 2px rgba(0,0,0,0.8)',
   },
   vadStatus: {
-    fontSize: '12px',
+    fontSize: '11px',
     fontWeight: 'bold',
     fontFamily: 'monospace',
-    marginTop: '4px',
+    marginTop: '2px',
   },
 };

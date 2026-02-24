@@ -1,11 +1,8 @@
-// src/features/spectrum/spectrum.renderer.ts
 export class SpectrumRenderer {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private width: number;
   private height: number;
-  private readonly sampleRate = 48000;
-  private readonly fftSize = 512;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -20,44 +17,40 @@ export class SpectrumRenderer {
     this.height = rect.height;
   }
 
-  render(rawSpectrum: number[], cleanSpectrum: number[]): void {
+  render(
+    rawSpectrum: number[],
+    cleanSpectrum: number[],
+    frequencies: number[]
+  ): void {
     this.ctx.clearRect(0, 0, this.width, this.height);
 
-    // Draw frequency grid
-    this.drawFrequencyGrid();
-
-    // Draw raw spectrum (red bars, background)
-    this.drawSpectrumBars(rawSpectrum, '#ff4444', 0.3, true);
-
-    // Draw clean spectrum (green bars, foreground)
-    this.drawSpectrumBars(cleanSpectrum, '#00ff88', 0.9, false);
-
-    // Draw legend
+    this.drawGrid(frequencies);
+    this.drawSpectrumBars(rawSpectrum, frequencies, '#ff4444', 0.3, true);
+    this.drawSpectrumBars(cleanSpectrum, frequencies, '#00ff88', 0.9, false);
     this.drawLegend();
   }
 
-  private drawFrequencyGrid(): void {
+  private drawGrid(frequencies: number[]): void {
     this.ctx.strokeStyle = '#1a1a1a';
     this.ctx.lineWidth = 1;
 
     // Frequency markers (kHz)
-    const freqs = [0, 4, 8, 12, 16, 20, 24];
-    const nyquist = this.sampleRate / 2;
+    const freqMarkers = [0, 4000, 8000, 12000, 16000, 20000, 24000];
+    const maxFreq = frequencies[frequencies.length - 1] || 24000;
 
-    freqs.forEach(freq => {
-      const x = (freq / nyquist) * this.width;
+    freqMarkers.forEach(freq => {
+      if (freq > maxFreq) return;
+      const x = (freq / maxFreq) * this.width;
       this.ctx.beginPath();
       this.ctx.moveTo(x, 0);
       this.ctx.lineTo(x, this.height);
       this.ctx.stroke();
 
-      // Label
-      this.ctx.fillStyle = '#666';
+      this.ctx.fillStyle = '#555';
       this.ctx.font = '10px monospace';
-      this.ctx.fillText(`${freq}k`, x + 2, this.height - 5);
+      this.ctx.fillText(`${freq/1000}k`, x + 2, this.height - 5);
     });
 
-    // Horizontal grid lines (dB)
     for (let i = 1; i < 5; i++) {
       const y = (this.height / 5) * i;
       this.ctx.beginPath();
@@ -67,11 +60,17 @@ export class SpectrumRenderer {
     }
   }
 
-  private drawSpectrumBars(spectrum: number[], color: string, alpha: number, fill: boolean): void {
+  private drawSpectrumBars(
+    spectrum: number[],
+    frequencies: number[],
+    color: string,
+    alpha: number,
+    fill: boolean
+  ): void {
     if (!spectrum || spectrum.length === 0) return;
 
-    const barWidth = this.width / spectrum.length;
-    const maxVal = Math.max(...spectrum, 1); // Avoid division by zero
+    const maxFreq = frequencies[frequencies.length - 1] || 24000;
+    const maxVal = Math.max(...spectrum, 1);
 
     this.ctx.fillStyle = color;
     this.ctx.strokeStyle = color;
@@ -79,12 +78,18 @@ export class SpectrumRenderer {
 
     for (let i = 0; i < spectrum.length; i++) {
       const magnitude = spectrum[i];
-      // Log scale for better visualization
+      const freq = frequencies[i];
+
+      const x = (freq / maxFreq) * this.width;
+      const nextX = i < spectrum.length - 1
+        ? (frequencies[i + 1] / maxFreq) * this.width
+        : this.width;
+      const barWidth = nextX - x;
+
       const db = 20 * Math.log10(magnitude + 1e-10);
-      const normalizedDb = Math.max(0, (db + 100) / 100); // Normalize -100dB to 0dB range
+      const normalizedDb = Math.max(0, (db + 100) / 100);
       const barHeight = normalizedDb * this.height * 0.95;
 
-      const x = i * barWidth;
       const y = this.height - barHeight;
 
       if (fill) {

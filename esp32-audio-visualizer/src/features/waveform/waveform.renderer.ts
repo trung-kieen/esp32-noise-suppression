@@ -33,18 +33,13 @@ export class WaveformRenderer {
   render(rawWaveform: number[], cleanWaveform: number[]): void {
     this.ctx.clearRect(0, 0, this.width, this.height);
 
-    // Calculate peak amplitude from both waveforms
     const allSamples = [...rawWaveform, ...cleanWaveform];
     const peak = Math.max(...allSamples.map(Math.abs), 1);
     this.lastPeak = peak;
 
     if (this.autoScale) {
-      // Target: make peak use 75% of available height
-      // Available height is 45% of canvas (from drawWaveformLine)
-      // So we want peak * scale = 0.75 * 32768
-      const targetAmplitude = 24576; // 75% of int16 max
+      const targetAmplitude = 24576;
       this.currentScale = targetAmplitude / peak;
-      // Clamp to reasonable limits (1x to 50x)
       this.currentScale = Math.max(1, Math.min(50, this.currentScale));
     } else {
       this.currentScale = this.gain;
@@ -52,13 +47,8 @@ export class WaveformRenderer {
 
     this.drawGrid();
     this.drawCenterLine();
-
-    // Draw raw waveform (red, semi-transparent, behind)
     this.drawWaveformLine(rawWaveform, '#ff4444', 0.5, 2, this.currentScale);
-
-    // Draw clean waveform (green, solid, on top)
     this.drawWaveformLine(cleanWaveform, '#00ff88', 1.0, 2.5, this.currentScale);
-
     this.drawLegend();
     this.drawScaleInfo(peak, this.currentScale);
     this.drawAxisLabels();
@@ -68,7 +58,6 @@ export class WaveformRenderer {
     this.ctx.strokeStyle = '#1a1a1a';
     this.ctx.lineWidth = 1;
 
-    // Vertical time lines (every 10ms = 1/4 of width)
     for (let i = 1; i < 4; i++) {
       const x = (this.width / 4) * i;
       this.ctx.beginPath();
@@ -77,7 +66,6 @@ export class WaveformRenderer {
       this.ctx.stroke();
     }
 
-    // Horizontal amplitude lines (25%, 75% of height)
     [0.25, 0.75].forEach(pct => {
       const y = this.height * pct;
       this.ctx.beginPath();
@@ -116,7 +104,6 @@ export class WaveformRenderer {
 
     const step = this.width / data.length;
     const centerY = this.height / 2;
-    // Use 45% of half-height to leave padding at top/bottom
     const amplitudeScale = (this.height / 2) * 0.45;
 
     let lastX = 0;
@@ -124,7 +111,6 @@ export class WaveformRenderer {
 
     for (let i = 0; i < data.length; i++) {
       const x = i * step;
-      // Normalize int16 to -1..1, apply scale, clamp to prevent overflow
       const normalized = (data[i] / 32768) * scale;
       const clamped = Math.max(-1, Math.min(1, normalized));
       const y = centerY - (clamped * amplitudeScale);
@@ -132,7 +118,6 @@ export class WaveformRenderer {
       if (i === 0) {
         this.ctx.moveTo(x, y);
       } else {
-        // Use quadratic curves for smoother lines
         const midX = (lastX + x) / 2;
         const midY = (lastY + y) / 2;
         this.ctx.quadraticCurveTo(lastX, lastY, midX, midY);
@@ -149,20 +134,16 @@ export class WaveformRenderer {
 
   private drawLegend(): void {
     const legendY = 25;
-    const fontSize = 12;
-    this.ctx.font = `${fontSize}px monospace`;
+    this.ctx.font = '12px monospace';
 
-    // Background for legend
     this.ctx.fillStyle = 'rgba(0,0,0,0.7)';
     this.ctx.fillRect(this.width - 160, 10, 150, 50);
 
-    // Raw legend
     this.ctx.fillStyle = '#ff4444';
     this.ctx.fillRect(this.width - 150, legendY - 8, 12, 12);
     this.ctx.fillStyle = '#fff';
     this.ctx.fillText('Raw (Input)', this.width - 135, legendY + 3);
 
-    // Clean legend
     this.ctx.fillStyle = '#00ff88';
     this.ctx.fillRect(this.width - 150, legendY + 15, 12, 12);
     this.ctx.fillStyle = '#fff';
@@ -173,7 +154,6 @@ export class WaveformRenderer {
     const mode = this.autoScale ? 'AUTO' : 'MANUAL';
     const peakPercent = ((peakValue / 32768) * 100).toFixed(1);
 
-    // Background
     this.ctx.fillStyle = 'rgba(0,0,0,0.7)';
     this.ctx.fillRect(10, 10, 180, 55);
 
@@ -188,14 +168,12 @@ export class WaveformRenderer {
     this.ctx.fillStyle = '#666';
     this.ctx.font = '10px monospace';
 
-    // Time axis (bottom)
     this.ctx.fillText('0ms', 5, this.height - 5);
     this.ctx.fillText('10', this.width * 0.25 - 10, this.height - 5);
     this.ctx.fillText('20', this.width * 0.5 - 10, this.height - 5);
     this.ctx.fillText('30', this.width * 0.75 - 10, this.height - 5);
     this.ctx.fillText('40ms', this.width - 35, this.height - 5);
 
-    // Amplitude axis (left)
     const maxShown = Math.round(32768 / this.currentScale);
     this.ctx.fillText(`+${maxShown}`, 5, 15);
     this.ctx.fillText('0', 5, this.height / 2 + 3);
