@@ -1,4 +1,3 @@
-// src/features/metrics/metrics.component.tsx
 import React from 'react';
 
 interface MetricsProps {
@@ -14,6 +13,7 @@ interface MetricsProps {
   frameSeq: number;
   serverProcessingMs: number;
   queueDepth: number;
+  sampleRate?: number;  // NEW
   connected: boolean;
 }
 
@@ -30,13 +30,29 @@ export const MetricsPanel: React.FC<MetricsProps> = ({
   frameSeq,
   serverProcessingMs,
   queueDepth,
+  sampleRate = 48000, // Default to 48kHz
   connected
 }) => {
   const formatDb = (val: number) => `${val.toFixed(1)} dB`;
   const voiceDetected = vad > 0.5;
 
+  // Calculate derived values
+  const fs_khz = (sampleRate / 1000).toFixed(1);
+  const nyquist = (sampleRate / 2 / 1000).toFixed(1);
+
   return (
     <div style={styles.container}>
+      {/* SAMPLING RATE - NEW BIG DISPLAY */}
+      <div style={{...styles.metricBox, ...styles.fsBox}}>
+        <div style={styles.fsLabel}>SAMPLING RATE (fs)</div>
+        <div style={styles.fsValue}>
+          {sampleRate.toLocaleString()} <span style={styles.fsUnit}>Hz</span>
+        </div>
+        <div style={styles.fsSubtext}>
+          {fs_khz} kHz | Nyquist: {nyquist} kHz | 16-bit PCM
+        </div>
+      </div>
+
       {/* Connection Status */}
       <div style={styles.metricBox}>
         <div style={styles.label}>Status</div>
@@ -150,6 +166,39 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     alignItems: 'center',
     minWidth: '100px',
+  },
+  // NEW: Special styling for fs box
+  fsBox: {
+    gridColumn: 'span 2', // Takes 2 columns
+    backgroundColor: '#0f2f1f', // Dark green background
+    border: '2px solid #00ff88',
+    minWidth: '200px',
+  },
+  fsLabel: {
+    color: '#00ff88',
+    fontSize: '11px',
+    textTransform: 'uppercase',
+    letterSpacing: '2px',
+    marginBottom: '4px',
+    fontFamily: 'monospace',
+    fontWeight: 'bold',
+  },
+  fsValue: {
+    color: '#00ff88',
+    fontSize: '32px',
+    fontWeight: 'bold',
+    fontFamily: 'monospace',
+    textShadow: '0 0 10px rgba(0,255,136,0.3)',
+  },
+  fsUnit: {
+    fontSize: '18px',
+    color: '#00aa66',
+  },
+  fsSubtext: {
+    color: '#66aa88',
+    fontSize: '11px',
+    marginTop: '4px',
+    fontFamily: 'monospace',
   },
   label: {
     color: '#888',

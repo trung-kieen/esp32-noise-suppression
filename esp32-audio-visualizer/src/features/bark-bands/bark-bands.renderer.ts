@@ -3,6 +3,7 @@ export class BarkBandsRenderer {
   private ctx: CanvasRenderingContext2D;
   private width: number;
   private height: number;
+  private sampleRate: number = 48000;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -20,21 +21,23 @@ export class BarkBandsRenderer {
   render(
     rawBands: number[],
     cleanBands: number[],
-    bandEdges: number[]
+    bandEdges: number[],
+    sampleRate: number = 48000
   ): void {
+    this.sampleRate = sampleRate;
     this.ctx.clearRect(0, 0, this.width, this.height);
 
     this.drawGrid(bandEdges);
     this.drawBars(rawBands, '#ff4444', 0.4);
     this.drawBars(cleanBands, '#00ff88', 0.8);
-    this.drawLegend();
+    this.drawLegend(sampleRate, bandEdges);
   }
 
   private drawGrid(bandEdges: number[]): void {
     this.ctx.strokeStyle = '#1a1a1a';
     this.ctx.lineWidth = 1;
 
-    // Vertical lines for band boundaries (show every 5th)
+    // Show every 5th band boundary
     for (let i = 0; i < bandEdges.length; i += 5) {
       const x = (i / (bandEdges.length - 1)) * this.width;
       this.ctx.beginPath();
@@ -73,17 +76,32 @@ export class BarkBandsRenderer {
     this.ctx.globalAlpha = 1.0;
   }
 
-  private drawLegend(): void {
-    this.ctx.font = '11px monospace';
+  private drawLegend(sampleRate: number, bandEdges: number[]): void {
+    // Background
+    this.ctx.fillStyle = 'rgba(0,0,0,0.8)';
+    this.ctx.fillRect(10, 10, 200, 55);
+
+    // fs
+    this.ctx.fillStyle = '#00ff88';
+    this.ctx.font = 'bold 12px monospace';
+    this.ctx.fillText(`fs = ${sampleRate.toLocaleString()} Hz`, 15, 28);
+
+    // Bark info
+    this.ctx.fillStyle = '#aaa';
+    this.ctx.font = '10px monospace';
+    this.ctx.fillText(`24 Bark bands | 0-${Math.round(bandEdges[bandEdges.length-1]/1000)}kHz`, 15, 48);
+
+    // Mini legend
+    this.ctx.font = '10px monospace';
 
     this.ctx.fillStyle = '#ff4444';
-    this.ctx.fillRect(10, 10, 12, 12);
+    this.ctx.fillRect(this.width - 80, 12, 10, 10);
     this.ctx.fillStyle = '#fff';
-    this.ctx.fillText('Raw Bark', 26, 20);
+    this.ctx.fillText('Raw', this.width - 68, 21);
 
     this.ctx.fillStyle = '#00ff88';
-    this.ctx.fillRect(10, 26, 12, 12);
+    this.ctx.fillRect(this.width - 80, 28, 10, 10);
     this.ctx.fillStyle = '#fff';
-    this.ctx.fillText('Clean Bark', 26, 36);
+    this.ctx.fillText('Clean', this.width - 68, 37);
   }
 }

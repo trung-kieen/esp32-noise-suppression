@@ -1,3 +1,4 @@
+// src/app/dashboard.tsx
 import React, { useEffect, useRef, useState } from 'react';
 import { WebSocketService } from '../core/websocket.service';
 import { VisualizationDTO } from '../core/dto.types';
@@ -72,17 +73,22 @@ export const AudioDashboard: React.FC = () => {
       if (dto) {
         waveformRenderer.current?.render(
           dto.waveform.raw,
-          dto.waveform.clean
+          dto.waveform.clean,
+          dto.waveform.sampleRate,
+          dto.waveform.durationMs
         );
         spectrumRenderer.current?.render(
           dto.spectrum.raw,
           dto.spectrum.clean,
-          dto.spectrum.frequencies
+          dto.spectrum.frequencies,
+          dto.waveform.sampleRate, // Pass fs from waveform
+          dto.spectrum.fftSize
         );
         barkBandsRenderer.current?.render(
           dto.barkBands.raw,
           dto.barkBands.clean,
-          dto.barkBands.bandEdges
+          dto.barkBands.bandEdges,
+          dto.waveform.sampleRate // Pass fs from waveform
         );
         vadHistoryRenderer.current?.render();
       }
@@ -96,12 +102,15 @@ export const AudioDashboard: React.FC = () => {
     };
   }, [dto]);
 
+  // Extract fs for display
+  const sampleRate = dto?.waveform?.sampleRate || 48000;
+
   return (
     <div style={styles.container}>
       <header style={styles.header}>
         <h1 style={styles.title}>🔊 ESP32-S3 Audio Visualizer</h1>
         <div style={styles.subtitle}>
-          Real-time RNNoise | 48kHz | Batch: 4×480 samples | 40ms window
+          Real-time Audio Monitoring | {sampleRate.toLocaleString()} Hz | 16-bit PCM
         </div>
       </header>
 
@@ -118,6 +127,7 @@ export const AudioDashboard: React.FC = () => {
         frameSeq={dto?.system?.frameSeq ?? 0}
         serverProcessingMs={dto?.system?.serverProcessingMs ?? 0}
         queueDepth={dto?.system?.queueDepth ?? 0}
+        sampleRate={sampleRate} // NEW
         connected={connected}
       />
 
@@ -129,7 +139,7 @@ export const AudioDashboard: React.FC = () => {
             onChange={(e) => setAutoScale(e.target.checked)}
             style={styles.checkbox}
           />
-          <span>Auto-scale waveform (recommended for voice)</span>
+          <span>Auto-scale waveform</span>
         </label>
 
         {!autoScale && (
@@ -144,7 +154,7 @@ export const AudioDashboard: React.FC = () => {
               onChange={(e) => setGain(parseFloat(e.target.value))}
               style={styles.slider}
             />
-            <span style={styles.gainHint}>Use 10-30x for quiet voice at 1m</span>
+            <span style={styles.gainHint}>Use 10-30x for quiet voice</span>
           </div>
         )}
       </div>
@@ -154,7 +164,9 @@ export const AudioDashboard: React.FC = () => {
           <div style={styles.sectionHeader}>
             <span style={styles.sectionTitle}>Waveform</span>
             <span style={styles.sectionSubtitle}>
-              {dto?.waveform ? `${dto.waveform.durationMs}ms @ ${dto.waveform.sampleRate/1000}kHz` : 'Waiting...'}
+              {dto?.waveform
+                ? `${dto.waveform.durationMs}ms window @ fs=${dto.waveform.sampleRate/1000}kHz`
+                : 'Waiting...'}
             </span>
           </div>
           <canvas ref={waveformRef} style={styles.canvas} />
@@ -164,7 +176,9 @@ export const AudioDashboard: React.FC = () => {
           <div style={styles.sectionHeader}>
             <span style={styles.sectionTitle}>Frequency Spectrum</span>
             <span style={styles.sectionSubtitle}>
-              {dto?.spectrum ? `FFT ${dto.spectrum.fftSize} | Hop ${dto.spectrum.hopLength}` : 'Waiting...'}
+              {dto?.spectrum
+                ? `FFT-${dto.spectrum.fftSize} | 0-${dto.waveform.sampleRate/2000}kHz | fs=${dto.waveform.sampleRate/1000}kHz`
+                : 'Waiting...'}
             </span>
           </div>
           <canvas ref={spectrumRef} style={styles.canvas} />
@@ -172,8 +186,12 @@ export const AudioDashboard: React.FC = () => {
 
         <div style={styles.halfSection}>
           <div style={styles.sectionHeader}>
-            <span style={styles.sectionTitle}>Bark Bands (24 bands)</span>
-            <span style={styles.sectionSubtitle}>Psychoacoustic energy</span>
+            <span style={styles.sectionTitle}>Bark Bands</span>
+            <span style={styles.sectionSubtitle}>
+              {dto?.barkBands
+                ? `24 bands | fs=${dto.waveform.sampleRate/1000}kHz`
+                : 'Waiting...'}
+            </span>
           </div>
           <canvas ref={barkBandsRef} style={styles.canvas} />
         </div>
@@ -312,7 +330,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   sectionSubtitle: {
     fontSize: '10px',
-    color: '#666',
+    color: '#00ff88', // Green to highlight fs info
     fontFamily: 'monospace',
   },
   canvas: {

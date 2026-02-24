@@ -251,13 +251,13 @@ class VoiceActivityLogger:
     def create_vad_indicator(self, vad_prob: float) -> str:
         """Create VAD probability indicator"""
         if vad_prob > 0.8:
-            return f"🎤 SPEAKING ({vad_prob:.2f})"
+            return f"SPEAKING ({vad_prob:.2f})"
         elif vad_prob > 0.5:
-            return f"🗣️  voice  ({vad_prob:.2f})"
+            return f"voice  ({vad_prob:.2f})"
         elif vad_prob > 0.2:
-            return f"💨 noise   ({vad_prob:.2f})"
+            return f"noise   ({vad_prob:.2f})"
         else:
-            return f"🔇 silence ({vad_prob:.2f})"
+            return f"silence ({vad_prob:.2f})"
 
     def calculate_peak(self, pcm_samples: List[int]) -> int:
         """Calculate peak amplitude"""
@@ -300,25 +300,25 @@ class VoiceActivityLogger:
             print("="*80)
 
             print(f"\n📊 PEAK AMPLITUDE:     {self.create_volume_bar(peak)}")
-            print(f"📊 RMS LEVEL:          {self.create_db_bar(rms_db)}")
-            print(f"📊 VAD PROBABILITY:    {self.create_vad_indicator(last_frame.vad_prob)}")
-            print(f"📊 SNR:                {snr:>5.1f} dB")
+            print(f"RMS LEVEL:          {self.create_db_bar(rms_db)}")
+            print(f"VAD PROBABILITY:    {self.create_vad_indicator(last_frame.vad_prob)}")
+            print(f"SNR:                {snr:>5.1f} dB")
 
             total_frames = self.speaking_frames + self.silent_frames
             if total_frames > 0:
                 speak_pct = (self.speaking_frames / total_frames) * 100
-                print(f"\n📈 STATS: Speaking: {self.speaking_frames} ({speak_pct:.1f}%) | "
+                print(f"\nSTATS: Speaking: {self.speaking_frames} ({speak_pct:.1f}%) | "
                       f"Silent: {self.silent_frames} | Clients: {num_clients}")
 
             if len(self.vad_history) > 10:
                 recent_vad = list(self.vad_history)[-20:]
                 sparkline = ''.join(['▁' if v < 0.2 else '▂' if v < 0.4 else '▃' if v < 0.6 else '▅' if v < 0.8 else '█' for v in recent_vad])
-                print(f"\n📉 VAD HISTORY (last 20): {sparkline}")
+                print(f"\nVAD HISTORY (last 20): {sparkline}")
 
             if packet_loss > 0:
-                print(f"\n⚠️  PACKET LOSS: {packet_loss} batches lost!")
+                print(f"\nPACKET LOSS: {packet_loss} batches lost!")
 
-            print(f"\n💡 MIC TEST: {'SPEAK NOW!' if last_frame.vad_prob < 0.3 else 'Voice detected ✓'}")
+            print(f"\nMIC TEST: {'SPEAK NOW!' if last_frame.vad_prob < 0.3 else 'Voice detected ✓'}")
             print("="*80)
 
         # Simple one-line log for significant activity
@@ -403,12 +403,12 @@ class BroadcastManager:
         """Register client with API version preference"""
         self.frontend_clients.add(websocket)
         self.client_versions[websocket] = version
-        logger.info(f"📈 Frontend client registered (API v{version}). Total: {len(self.frontend_clients)}")
+        logger.info(f"Frontend client registered (API v{version}). Total: {len(self.frontend_clients)}")
 
     def unregister(self, websocket: ServerConnection):
         self.frontend_clients.discard(websocket)
         self.client_versions.pop(websocket, None)
-        logger.info(f"📉 Frontend client unregistered. Total: {len(self.frontend_clients)}")
+        logger.info(f"Frontend client unregistered. Total: {len(self.frontend_clients)}")
 
     def broadcast_dto(self, dto_v2: VisualizationDTOv2):
         """Broadcast to all clients with version-appropriate formatting"""
@@ -445,16 +445,16 @@ class ESP32Handler:
 
     async def handle(self, websocket: ServerConnection):
         client_addr = websocket.remote_address
-        logger.info(f"🔌 ESP32 connected from {client_addr}")
-        logger.info("🎤 Microphone test mode: Speak near the mic to see volume bars!")
+        logger.info(f"ESP32 connected from {client_addr}")
+        logger.info("Microphone test mode: Speak near the mic to see volume bars!")
 
         try:
             async for message in websocket:
                 await self._process_binary_message(message)
         except websockets.ConnectionClosed:
-            logger.info(f"🔌 ESP32 disconnected from {client_addr}")
+            logger.info(f"ESP32 disconnected from {client_addr}")
         except Exception as e:
-            logger.error(f"❌ Error handling ESP32: {e}", exc_info=True)
+            logger.error(f"Error handling ESP32: {e}", exc_info=True)
 
     async def _process_binary_message(self, message: bytes):
         start_proc = time.perf_counter()
@@ -660,12 +660,12 @@ class AudioServer:
             await websocket.close(code=1000, reason=f"Unknown endpoint: {path}")
 
     async def start(self):
-        logger.info(f"🚀 Server starting on ws://{self.host}:{self.port}")
-        logger.info(f"   ESP32:      ws://{self.host}:{self.port}/esp32")
-        logger.info(f"   Visualizer: ws://{self.host}:{self.port}/visualizer")
-        logger.info(f"   Legacy:     ws://{self.host}:{self.port}/visualizer?version=legacy")
-        logger.info(f"   Legacy Alt: ws://{self.host}:{self.port}/visualizer-legacy")
-        logger.info("\n🎤 MIC TEST READY: Speak near the microphone to see volume bars!\n")
+        logger.info(f"Server starting on ws://{self.host}:{self.port}")
+        logger.info(f"  ESP32:      ws://{self.host}:{self.port}/esp32")
+        logger.info(f"  Visualizer: ws://{self.host}:{self.port}/visualizer")
+        logger.info(f"  Legacy:     ws://{self.host}:{self.port}/visualizer?version=legacy")
+        logger.info(f"  Legacy Alt: ws://{self.host}:{self.port}/visualizer-legacy")
+        logger.info("\n MIC TEST READY: Speak near the microphone to see volume bars!\n")
 
         server = await serve(
             self.route_connection,
@@ -689,4 +689,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("\n🛑 Server stopped")
+        logger.info("\nServer stopped")
