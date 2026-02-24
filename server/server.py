@@ -3,6 +3,7 @@ import websockets
 import struct
 import time
 import math
+import json
 
 # --- Cấu hình theo SSOT ---
 MAGIC_NUMBER = 0xABCD1234
@@ -22,47 +23,106 @@ def create_volume_bar(max_val, length=30):
     bar = '█' * filled_length + '-' * (length - filled_length)
     return f"[{bar}] {max_val:>5}"
 
+# async def handle_client(websocket):
+#     print(f"Thiết bị đã kết nối: {websocket.remote_address}")
+
+#     try:
+#         async for message in websocket:
+#             if not isinstance(message, bytes) or len(message) != EXPECTED_PACKET_SIZE:
+#                 continue
+
+#             # 1. Parse Header
+#             header_data = message[:BATCH_HEADER_SIZE]
+#             magic, version, batch_seq, timestamp_ms = struct.unpack(HEADER_FORMAT, header_data)
+
+#             if magic != MAGIC_NUMBER: continue
+
+#             # 2. Lấy frame cuối cùng trong batch để log (giảm tải màn hình)
+#             # Mỗi batch có 4 frames
+#             last_frame_offset = BATCH_HEADER_SIZE + (AUDIO_FRAME_SIZE * 3)
+#             frame_data = message[last_frame_offset : last_frame_offset + AUDIO_FRAME_SIZE]
+#             unpacked_frame = struct.unpack(FRAME_FORMAT, frame_data)
+
+#             # raw_pcm nằm từ chỉ số 3 đến 3+480 trong unpacked_frame
+#             raw_pcm = unpacked_frame[3 : 3 + FRAME_SIZE]
+#             vad_prob = unpacked_frame[1]
+
+#             # 3. Tính biên độ dao động (Peak)
+#             # Tìm giá trị tuyệt đối lớn nhất trong 480 samples
+#             peak = max(abs(sample) for sample in raw_pcm)
+
+#             # 4. Hiển thị log
+#             # Cứ mỗi 5 batch (~200ms) thì in một lần để dễ nhìn
+#             if batch_seq % 5 == 0:
+#                 volume_visual = create_volume_bar(peak)
+#                 print(f"Batch: {batch_seq:<5} | VAD: {vad_prob:.2f} | {volume_visual}", end='\r')
+
+#     except websockets.ConnectionClosed:
+#         print("\n❌ Thiết bị đã ngắt kết nối")
+
+
 async def handle_client(websocket):
     print(f"Thiết bị đã kết nối: {websocket.remote_address}")
-
     try:
         async for message in websocket:
             if not isinstance(message, bytes) or len(message) != EXPECTED_PACKET_SIZE:
                 continue
 
-            # 1. Parse Header
+            # ── Your existing parsing ──
             header_data = message[:BATCH_HEADER_SIZE]
             magic, version, batch_seq, timestamp_ms = struct.unpack(HEADER_FORMAT, header_data)
+            if magic != MAGIC_NUMBER:
+                continue
 
-            if magic != MAGIC_NUMBER: continue
-
-            # 2. Lấy frame cuối cùng trong batch để log (giảm tải màn hình)
-            # Mỗi batch có 4 frames
             last_frame_offset = BATCH_HEADER_SIZE + (AUDIO_FRAME_SIZE * 3)
             frame_data = message[last_frame_offset : last_frame_offset + AUDIO_FRAME_SIZE]
             unpacked_frame = struct.unpack(FRAME_FORMAT, frame_data)
 
-            # raw_pcm nằm từ chỉ số 3 đến 3+480 trong unpacked_frame
             raw_pcm = unpacked_frame[3 : 3 + FRAME_SIZE]
             vad_prob = unpacked_frame[1]
 
-            # 3. Tính biên độ dao động (Peak)
-            # Tìm giá trị tuyệt đối lớn nhất trong 480 samples
             peak = max(abs(sample) for sample in raw_pcm)
 
-            # 4. Hiển thị log
-            # Cứ mỗi 5 batch (~200ms) thì in một lần để dễ nhìn
             if batch_seq % 5 == 0:
                 volume_visual = create_volume_bar(peak)
                 print(f"Batch: {batch_seq:<5} | VAD: {vad_prob:.2f} | {volume_visual}", end='\r')
 
+            # ── NEW: Build and send JSON DTO (minimal version for testing) ──
+            dto = {
+                "batchSeq": batch_seq,
+                "latencyMs": 55,                    # fake for now
+                "snr": 17.2,                        # fake
+                "vad": float(vad_prob),             # real value
+                "packetLoss": 0,
+
+                # Fake spectra (257 bins is common for STFT with 512-point FFT)
+                "rawSpectrum": [0.3 + i*0.001 for i in range(257)],
+                "cleanSpectrum": [0.15 + i*0.0005 for i in range(257)],
+
+                # Send last frame's PCM (or you can concatenate 4 frames later)
+                "rawWaveform": list(raw_pcm),       # tuple → list
+                "cleanWaveform": list(raw_pcm),     # fake same as raw for now
+            }
+
+            try:
+                await websocket.send(json.dumps(dto))
+                print(f"Sent JSON for batch {batch_seq}", end='\r')  # optional log
+            except Exception as e:
+                print(f"Error sending JSON: {e}")
+
     except websockets.ConnectionClosed:
         print("\n❌ Thiết bị đã ngắt kết nối")
+
+# main() stays the same
+
 
 async def main():
     server = await websockets.serve(handle_client, "0.0.0.0", 8080)
     print("Server đang lắng nghe tại ws://0.0.0.0:8080")
     await server.wait_closed()
+
+
+
 
 if __name__ == "__main__":
     asyncio.run(main())

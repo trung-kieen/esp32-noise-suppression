@@ -1,11 +1,16 @@
-// src/main.tsx  (typical Vite starter file – you probably don't need to change it)
+// src/index.tsx
+// Entry point
+
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import App from './App';
-import './index.css';   // ← global styles if any
+import Dashboard from './Dashboard';
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
+const root = ReactDOM.createRoot(
+  document.getElementById('root') as HTMLElement
+);
+
+root.render(
   <React.StrictMode>
-    <App />
-  </React.StrictMode>,
+    <Dashboard />
+  </React.StrictMode>
 );
