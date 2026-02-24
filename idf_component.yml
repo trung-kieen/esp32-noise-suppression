@@ -1,0 +1,19 @@
+## =============================================================
+##  idf_component.yml
+##  Managed components pulled from https://components.espressif.com
+##  Place this file at: <project_root>/idf_component.yml
+##  (PlatformIO + ESP-IDF 5.x recognises this automatically)
+## =============================================================
+
+## Project metadata
+version: "1.0.0"
+
+dependencies:
+  ## WebSocket client — required for binary batch protocol (design doc §10)
+  ## Provides: esp_websocket_client.h
+  espressif/esp_websocket_client:
+    version: ">=1.1.0"
+
+  ## IDF version gate — APLL API requires ESP-IDF 5.x
+  idf:
+    version: ">=5.0.0"

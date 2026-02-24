@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Noise Suppression Dashboard</title>
+<style>
+  :root {
+    --bg:      #0d1117;
+    --surface: #161b22;
+    --border:  #30363d;
+    --accent:  #58a6ff;
+    --green:   #3fb950;
+    --yellow:  #d29922;
+    --red:     #f85149;
+    --text:    #e6edf3;
+    --muted:   #8b949e;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 13px;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  header h1 { font-size: 15px; font-weight: 600; }
+  #status-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--red);
+    transition: background 0.4s;
+  }
+  #status-dot.connected { background: var(--green); }
+  #status-label { color: var(--muted); font-size: 12px; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto auto;
+    gap: 12px;
+    padding: 16px;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+  }
+  .card h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+  canvas { width: 100%; display: block; }
+
+  /* Metrics row */
+  .metrics-row {
+    grid-column: 1 / -1;
+    display: flex;
+    gap: 12px;
+  }
+  .metric {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .metric label {
+    font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--muted);
+  }
+  .metric .value {
+    font-size: 22px; font-weight: 700;
+    color: var(--accent);
+    transition: color 0.3s;
+  }
+  .metric .value.warn  { color: var(--yellow); }
+  .metric .value.alert { color: var(--red); }
+
+  /* Spectrogram */
+  #spec-canvas { image-rendering: pixelated; }
+
+  /* VAD bar */
+  #vad-bar-wrap {
+    height: 12px; background: var(--border);
+    border-radius: 6px; overflow: hidden; margin-top: 4px;
+  }
+  #vad-bar {
+    height: 100%; width: 0%;
+    background: var(--green);
+    transition: width 0.08s, background 0.2s;
+    border-radius: 6px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div id="status-dot"></div>
+  <h1>ESP32-S3 Noise Suppression — Live Dashboard</h1>
+  <span id="status-label">Disconnected</span>
+</header>
+
+<div class="grid">
+
+  <!-- Metrics row -->
+  <div class="metrics-row">
+    <div class="metric">
+      <label>SNR</label>
+      <div class="value" id="m-snr">—</div>
+    </div>
+    <div class="metric">
+      <label>Latency</label>
+      <div class="value" id="m-lat">—</div>
+    </div>
+    <div class="metric">
+      <label>Batch #</label>
+      <div class="value" id="m-batch">—</div>
+    </div>
+    <div class="metric">
+      <label>Pkt Loss</label>
+      <div class="value" id="m-loss">0</div>
+    </div>
+    <div class="metric">
+      <label>VAD Prob</label>
+      <div class="value" id="m-vad">—</div>
+      <div id="vad-bar-wrap"><div id="vad-bar"></div></div>
+    </div>
+  </div>
+
+  <!-- Raw waveform -->
+  <div class="card">
+    <h2>Raw Waveform</h2>
+    <canvas id="raw-wave" height="100"></canvas>
+  </div>
+
+  <!-- Clean waveform -->
+  <div class="card">
+    <h2>Clean Waveform (stub = raw)</h2>
+    <canvas id="clean-wave" height="100"></canvas>
+  </div>
+
+  <!-- Raw spectrogram -->
+  <div class="card">
+    <h2>Raw Spectrum (STFT)</h2>
+    <canvas id="raw-spec" height="180"></canvas>
+  </div>
+
+  <!-- Clean spectrogram -->
+  <div class="card">
+    <h2>Clean Spectrum (STFT)</h2>
+    <canvas id="clean-spec" height="180"></canvas>
+  </div>
+
+</div>
+
+<script>
+// ─── Config ───────────────────────────────────────────────────────────────────
+const WS_URL         = "ws://192.168.1.100:8765/client";  // ← your server IP
+const RECONNECT_MS   = 2000;
+const SPEC_HISTORY   = 80;   // columns of spectrogram history
+
+// ─── DOM refs ─────────────────────────────────────────────────────────────────
+const statusDot   = document.getElementById("status-dot");
+const statusLabel = document.getElementById("status-label");
+const mSnr   = document.getElementById("m-snr");
+const mLat   = document.getElementById("m-lat");
+const mBatch = document.getElementById("m-batch");
+const mLoss  = document.getElementById("m-loss");
+const mVad   = document.getElementById("m-vad");
+const vadBar = document.getElementById("vad-bar");
+
+const rawWaveCanvas  = document.getElementById("raw-wave");
+const cleanWaveCanvas= document.getElementById("clean-wave");
+const rawSpecCanvas  = document.getElementById("raw-spec");
+const cleanSpecCanvas= document.getElementById("clean-spec");
+
+// ─── Canvas contexts ──────────────────────────────────────────────────────────
+function setupCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width  = (rect.width  || 600) * dpr;
+  canvas.height = (canvas.height || 100) * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  return ctx;
+}
+
+// Lazy init contexts after layout
+let ctxRawWave, ctxCleanWave, ctxRawSpec, ctxCleanSpec;
+window.addEventListener("load", () => {
+  ctxRawWave   = setupCanvas(rawWaveCanvas);
+  ctxCleanWave = setupCanvas(cleanWaveCanvas);
+  ctxRawSpec   = setupCanvas(rawSpecCanvas);
+  ctxCleanSpec = setupCanvas(cleanSpecCanvas);
+});
+
+// ─── Spectrogram ring buffer ───────────────────────────────────────────────────
+// Each column is one batch's frequency magnitudes
+let specRawCols   = [];  // array of Float32Array
+let specCleanCols = [];
+
+function pushSpecCol(cols, spectrum) {
+  cols.push(new Float32Array(spectrum));
+  if (cols.length > SPEC_HISTORY) cols.shift();
+}
+
+// ─── Drawing ──────────────────────────────────────────────────────────────────
+function drawWaveform(ctx, pcm) {
+  const W = ctx.canvas.width  / (window.devicePixelRatio || 1);
+  const H = ctx.canvas.height / (window.devicePixelRatio || 1);
+  ctx.clearRect(0, 0, W, H);
+
+  ctx.strokeStyle = "#58a6ff";
+  ctx.lineWidth   = 1;
+  ctx.beginPath();
+
+  const step = pcm.length / W;
+  for (let x = 0; x < W; x++) {
+    const idx = Math.floor(x * step);
+    const v   = pcm[idx] / 32768.0;       // normalise int16 → [-1,1]
+    const y   = (1 - v) * 0.5 * H;
+    x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Centre line
+  ctx.strokeStyle = "#30363d";
+  ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2);
+  ctx.stroke();
+}
+
+// Map magnitude [0, maxVal] → hue-based colour (blue→green→red)
+function magToColor(v, maxVal) {
+  const t = Math.min(v / (maxVal || 1), 1.0);
+  // Heatmap: 0=black/blue, 0.5=green, 1=red
+  const r = Math.floor(255 * Math.min(t * 2, 1));
+  const g = Math.floor(255 * Math.min(t * 2, 2 - t * 2));
+  const b = Math.floor(255 * Math.max(1 - t * 4, 0));
+  return `rgb(${r},${g},${b})`;
+}
+
+function drawSpectrogram(ctx, cols) {
+  if (cols.length === 0) return;
+  const W = ctx.canvas.width  / (window.devicePixelRatio || 1);
+  const H = ctx.canvas.height / (window.devicePixelRatio || 1);
+
+  ctx.clearRect(0, 0, W, H);
+
+  const freqBins = cols[0].length;
+  const colW     = W / SPEC_HISTORY;
+  const cellH    = H / freqBins;
+
+  // Find global max for normalisation across all columns
+  let maxVal = 0;
+  for (const col of cols) for (const v of col) if (v > maxVal) maxVal = v;
+
+  for (let c = 0; c < cols.length; c++) {
+    const col = cols[c];
+    const x   = c * colW;
+    for (let f = 0; f < freqBins; f++) {
+      // Flip: low freq at bottom
+      const y = H - (f + 1) * cellH;
+      ctx.fillStyle = magToColor(col[f], maxVal);
+      ctx.fillRect(x, y, colW + 0.5, cellH + 0.5);
+    }
+  }
+}
+
+// ─── Metrics update ───────────────────────────────────────────────────────────
+let totalLoss = 0;
+
+function updateMetrics(dto) {
+  totalLoss += dto.packetLoss;
+
+  mSnr.textContent   = dto.snr.toFixed(1) + " dB";
+  mLat.textContent   = dto.latencyMs.toFixed(0) + " ms";
+  mBatch.textContent = dto.batchSeq;
+  mLoss.textContent  = totalLoss;
+  mVad.textContent   = (dto.vad * 100).toFixed(0) + " %";
+
+  vadBar.style.width      = (dto.vad * 100) + "%";
+  vadBar.style.background = dto.vad > 0.6 ? "var(--green)"
+                          : dto.vad > 0.3 ? "var(--yellow)"
+                                          : "var(--muted)";
+
+  // SNR colour coding
+  mSnr.className = "value" +
+    (dto.snr >= 15 ? " "    :
+     dto.snr >=  5 ? " warn" : " alert");
+
+  mLat.className = "value" +
+    (dto.latencyMs <= 80 ? " "    :
+     dto.latencyMs <= 150 ? " warn" : " alert");
+
+  mLoss.className = "value" + (totalLoss > 0 ? " warn" : "");
+}
+
+// ─── Render loop (driven by requestAnimationFrame, ~60fps) ────────────────────
+// We only re-draw when new data arrives (flagged by pendingDraw)
+let latestDto   = null;
+let pendingDraw = false;
+
+function renderLoop() {
+  if (pendingDraw && latestDto && ctxRawWave) {
+    pendingDraw = false;
+    const dto = latestDto;
+
+    drawWaveform(ctxRawWave,   dto.rawWaveform);
+    drawWaveform(ctxCleanWave, dto.cleanWaveform);
+    drawSpectrogram(ctxRawSpec,   specRawCols);
+    drawSpectrogram(ctxCleanSpec, specCleanCols);
+  }
+  requestAnimationFrame(renderLoop);
+}
+requestAnimationFrame(renderLoop);
+
+// ─── WebSocket client ─────────────────────────────────────────────────────────
+function connect() {
+  const ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    statusDot.classList.add("connected");
+    statusLabel.textContent = "Connected — " + WS_URL;
+  };
+
+  ws.onclose = () => {
+    statusDot.classList.remove("connected");
+    statusLabel.textContent = "Disconnected — retrying in " + (RECONNECT_MS/1000) + "s";
+    setTimeout(connect, RECONNECT_MS);
+  };
+
+  ws.onerror = () => {
+    ws.close();
+  };
+
+  ws.onmessage = (evt) => {
+    let dto;
+    try { dto = JSON.parse(evt.data); }
+    catch { return; }
+
+    // Accumulate spectrogram history
+    pushSpecCol(specRawCols,   dto.rawSpectrum);
+    pushSpecCol(specCleanCols, dto.cleanSpectrum);
+
+    updateMetrics(dto);
+    latestDto   = dto;
+    pendingDraw = true;
+  };
+}
+
+connect();
+</script>
+</body>
+</html>
