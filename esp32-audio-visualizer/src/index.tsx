@@ -1,9 +1,8 @@
 // src/index.tsx
-// Entry point
-
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import Dashboard from './Dashboard';
+import { AudioDashboard } from './app/dashboard';
+import { Layout } from './app/layout';
 
 const root = ReactDOM.createRoot(
   document.getElementById('root') as HTMLElement
@@ -11,6 +10,8 @@ const root = ReactDOM.createRoot(
 
 root.render(
   <React.StrictMode>
-    <Dashboard />
+    <Layout>
+      <AudioDashboard />
+    </Layout>
   </React.StrictMode>
 );

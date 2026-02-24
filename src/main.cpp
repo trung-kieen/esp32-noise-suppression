@@ -114,6 +114,7 @@ void setup() {
 
     xTaskCreatePinnedToCore(audioInputTask, "MicTask", 4096, NULL, 10, NULL, 0);
     xTaskCreatePinnedToCore(processingTask, "ProcTask", 8192, NULL, 5, NULL, 1);
+
 }
 
 void loop() {
