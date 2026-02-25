@@ -1,5 +1,6 @@
 
-<img src="assets/demo.gif" style="width: 100vw; height: 100vh; object-fit: contain; position: fixed; top: 0; left: 0; z-index: 9999;">
+![Demo](assets/v.2.1.1.gif)
+<!-- <video src="./assets/v.2.1.1.mp4" width="1280" height="720" controls></video> -->
 
 ## 1. System Architecture Overview
 

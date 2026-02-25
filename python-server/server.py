@@ -30,6 +30,12 @@ SAMPLE_RATE = 48000
 FFT_SIZE = 512
 HOP_LENGTH = 256
 
+# Mel spectrogram constants (Design Doc v1.2 — Mel Spectrogram Addition)
+MEL_BINS = 40
+MEL_FMIN = 20.0     # Hz
+MEL_FMAX = 8000.0   # Hz
+MEL_TOP_DB = 80.0   # dB floor (librosa default: top_db=80 → range −80 to 0 dB)
+
 # Struct formats
 HEADER_FORMAT = "<IB3sII"
 FRAME_FORMAT = f"<Iff{SAMPLES_PER_FRAME}h{SAMPLES_PER_FRAME}h"
@@ -97,6 +103,23 @@ class BarkBandsData:
 
 
 @dataclass
+class MelSpectrogramData:
+    """
+    Log-mel spectrogram data (Design Doc v1.2 — Mel Spectrogram Addition)
+
+    Values are pre-computed in dB server-side.
+    Range: −80 to 0 dB (matches librosa default top_db=80).
+    Frontend reads dto.melSpectrogram.raw / .clean directly — no conversion needed.
+    If the server dB range changes, update DB_FLOOR / DB_CEIL in mel-spectrogram.renderer.ts.
+    """
+    raw: List[float] = field(default_factory=list)    # 40 log-mel band energies in dB (raw input)
+    clean: List[float] = field(default_factory=list)  # 40 log-mel band energies in dB (denoised)
+    melBins: int = MEL_BINS                            # Always 40
+    fMin: float = MEL_FMIN                             # 20 Hz
+    fMax: float = MEL_FMAX                             # 8000 Hz
+
+
+@dataclass
 class SystemMetrics:
     """System-level metrics"""
     frameSeq: int = 0
@@ -113,6 +136,7 @@ class VisualizationDTOv2:
     Includes all legacy fields plus:
     - Structured waveform/spectrum objects
     - Bark band energies (psychoacoustic)
+    - Mel spectrogram — log-mel dB, 40 bins (v1.2)
     - RMS aggregate (from frame headers)
     - Connection status
     - Total cumulative packet loss
@@ -135,6 +159,7 @@ class VisualizationDTOv2:
     waveform: WaveformData = field(default_factory=WaveformData)
     spectrum: SpectrumData = field(default_factory=SpectrumData)
     barkBands: BarkBandsData = field(default_factory=BarkBandsData)
+    melSpectrogram: MelSpectrogramData = field(default_factory=MelSpectrogramData)  # v1.2
 
     # System metrics
     system: SystemMetrics = field(default_factory=SystemMetrics)
@@ -150,7 +175,7 @@ class VisualizationDTOv2:
     cleanWaveform: List[int] = field(default_factory=list)  # Alias for waveform.clean
 
     def to_legacy_dict(self) -> Dict[str, Any]:
-        """Convert to legacy flat format for old clients"""
+        """Convert to legacy flat format for old clients (no mel spectrogram)"""
         return {
             "batchSeq": self.batchSeq,
             "latencyMs": self.latencyMs,
@@ -168,7 +193,7 @@ class VisualizationDTOv2:
         }
 
     def to_v2_dict(self) -> Dict[str, Any]:
-        """Convert to new nested format"""
+        """Convert to new nested format including mel spectrogram (v1.2)"""
         return {
             "batchSeq": self.batchSeq,
             "timestampMs": self.timestampMs,
@@ -196,6 +221,14 @@ class VisualizationDTOv2:
                 "raw": self.barkBands.raw,
                 "clean": self.barkBands.clean,
                 "bandEdges": self.barkBands.bandEdges
+            },
+            # v1.2: mel spectrogram — log-scaled dB, 40 bins, 20–8000 Hz
+            "melSpectrogram": {
+                "raw": self.melSpectrogram.raw,
+                "clean": self.melSpectrogram.clean,
+                "melBins": self.melSpectrogram.melBins,
+                "fMin": self.melSpectrogram.fMin,
+                "fMax": self.melSpectrogram.fMax,
             },
             "system": {
                 "frameSeq": self.system.frameSeq,
@@ -346,6 +379,127 @@ class AudioProcessingEngine:
             4400, 5300, 6400, 7700, 9500, 12000, 15500
         ])
         self.n_bands = len(self.bark_edges) - 1
+
+        # Pre-build mel filterbank once at startup (Design Doc v1.2)
+        # Shape: (MEL_BINS, n_fft//2 + 1) — applied to rfft magnitude vectors
+        self._mel_filterbank: np.ndarray = self._build_mel_filterbank(
+            n_fft=n_fft,
+            sample_rate=SAMPLE_RATE,
+            n_mels=MEL_BINS,
+            fmin=MEL_FMIN,
+            fmax=MEL_FMAX,
+        )
+        logger.info(
+            f"Mel filterbank ready: {MEL_BINS} bins, "
+            f"{MEL_FMIN:.0f}–{MEL_FMAX:.0f} Hz, shape={self._mel_filterbank.shape}"
+        )
+
+    # ------------------------------------------------------------------
+    # Mel filterbank helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _hz_to_mel(hz: float) -> float:
+        """Convert Hz to mel scale (HTK formula)"""
+        return 2595.0 * math.log10(1.0 + hz / 700.0)
+
+    @staticmethod
+    def _mel_to_hz(mel: float) -> float:
+        """Convert mel back to Hz (HTK formula)"""
+        return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
+
+    def _build_mel_filterbank(
+        self,
+        n_fft: int,
+        sample_rate: int,
+        n_mels: int,
+        fmin: float,
+        fmax: float,
+    ) -> np.ndarray:
+        """
+        Build a triangular mel filterbank matrix.
+
+        Parameters
+        ----------
+        n_fft       : FFT window size (512)
+        sample_rate : Audio sample rate (48000)
+        n_mels      : Number of mel bands (40)
+        fmin        : Lowest mel frequency in Hz (20)
+        fmax        : Highest mel frequency in Hz (8000)
+
+        Returns
+        -------
+        np.ndarray, shape (n_mels, n_fft // 2 + 1)
+            Each row is one triangular filter over the rfft frequency bins.
+        """
+        n_freqs = n_fft // 2 + 1
+        # Linear Hz axis for each rfft bin
+        fft_freqs = np.linspace(0.0, sample_rate / 2.0, n_freqs)
+
+        mel_min = self._hz_to_mel(fmin)
+        mel_max = self._hz_to_mel(fmax)
+
+        # n_mels + 2 evenly-spaced mel points (lower edge, n_mels centres, upper edge)
+        mel_points = np.linspace(mel_min, mel_max, n_mels + 2)
+        hz_points = np.array([self._mel_to_hz(m) for m in mel_points])
+
+        filterbank = np.zeros((n_mels, n_freqs), dtype=np.float32)
+        for m in range(n_mels):
+            f_left   = hz_points[m]       # left edge of triangle
+            f_center = hz_points[m + 1]   # peak
+            f_right  = hz_points[m + 2]   # right edge
+
+            rising  = (fft_freqs - f_left)  / (f_center - f_left)
+            falling = (f_right - fft_freqs) / (f_right  - f_center)
+            filterbank[m] = np.maximum(0.0, np.minimum(rising, falling))
+
+        return filterbank  # (n_mels, n_freqs)
+
+    # ------------------------------------------------------------------
+    # Mel spectrogram computation (Design Doc v1.2)
+    # ------------------------------------------------------------------
+
+    def compute_mel_spectrogram(self, pcm_samples: List[int]) -> List[float]:
+        """
+        Compute a single-frame log-mel energy vector from raw PCM samples.
+
+        Pipeline
+        --------
+        1. FFT-512 over the last 512 samples of the 40 ms window (1920 samples)
+        2. Power spectrum  = magnitude²
+        3. Mel filterbank  = filterbank (40×257) @ power (257,)  →  40 band energies
+        4. Power → dB      = 10 · log10(mel_power), floor at 1e-10
+        5. Peak-normalise  → shift so maximum = 0 dB
+        6. Clamp floor     → clip values below −top_db (−80 dB)
+
+        Output range: −80 to 0 dB.  Frontend renderer uses this directly
+        (isLogScaled: true) — no further conversion required.
+
+        Returns
+        -------
+        List[float]
+            40 log-mel energy values in dB, clamped to [−80, 0].
+        """
+        magnitude = self.compute_stft(pcm_samples)      # (n_fft//2 + 1,)
+        power = magnitude ** 2                           # power spectrum
+
+        # Apply triangular mel filterbank  →  (MEL_BINS,)
+        mel_power = self._mel_filterbank @ power
+
+        # Convert power to dB (avoid log(0) with a small floor)
+        mel_power = np.maximum(mel_power, 1e-10)
+        mel_db = 10.0 * np.log10(mel_power)
+
+        # Normalise so peak bin = 0 dB, then floor at −top_db
+        peak_db = float(mel_db.max())
+        mel_db = mel_db - peak_db           # range: (−∞, 0]
+        mel_db = np.maximum(mel_db, -MEL_TOP_DB)  # clamp floor to −80 dB
+
+        return mel_db.tolist()
+
+    # ------------------------------------------------------------------
+    # Existing DSP methods (unchanged)
+    # ------------------------------------------------------------------
 
     def compute_stft(self, pcm_samples: List[int]) -> np.ndarray:
         """Compute STFT magnitude spectrum"""
@@ -526,6 +680,13 @@ class ESP32Handler:
         raw_bark = self.dsp_engine.compute_bark_energies(raw_spectrum, freqs)
         clean_bark = self.dsp_engine.compute_bark_energies(clean_spectrum, freqs)
 
+        # Mel spectrogram (Design Doc v1.2)
+        # Computed over the full 40 ms aggregated window (1920 samples).
+        # The FFT-512 inside compute_mel_spectrogram uses the last 512 samples
+        # (equivalent to one full RNNoise frame) for a per-batch snapshot.
+        raw_mel_db  = self.dsp_engine.compute_mel_spectrogram(all_raw)
+        clean_mel_db = self.dsp_engine.compute_mel_spectrogram(all_clean)
+
         # Aggregate metrics
         mean_rms_raw = np.mean([f.rms_raw for f in frames])
         max_vad = max(f.vad_prob for f in frames)
@@ -573,6 +734,15 @@ class ESP32Handler:
                 raw=raw_bark.tolist(),
                 clean=clean_bark.tolist(),
                 bandEdges=self.dsp_engine.bark_edges.tolist()
+            ),
+
+            # v1.2: log-mel spectrogram — 40 bins, 20–8000 Hz, dB range −80 to 0
+            melSpectrogram=MelSpectrogramData(
+                raw=raw_mel_db,
+                clean=clean_mel_db,
+                melBins=MEL_BINS,
+                fMin=MEL_FMIN,
+                fMax=MEL_FMAX,
             ),
 
             system=SystemMetrics(

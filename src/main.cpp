@@ -1,7 +1,7 @@
 /**
  * @file main.cpp
  * @brief ESP32-S3 Real-time Audio Streaming with Pluggable AI Denoising
- * @version 2.1.0
+ * @version 2.1.1
  *
  * Architecture Overview:
  * ─────────────────────────────────────────────────────────────────────────────
@@ -13,6 +13,7 @@
  *  - Binary WebSocket protocol (BatchHeader 16 B + 4 × AudioFrame 1932 B = 7744 B)
  *  - All buffers statically allocated — no malloc/new in runtime loop
  *  - Audio processing never blocks on networking
+ *  - I2S 32-bit mode for BCLK = 64×WS per INMP441 requirements (Design Doc v1.2 §6)
  *
  * Inference Separation (v2.1 change):
  *  - All denoising/inference logic lives inside classes that implement IAudioProcessor.
@@ -262,7 +263,7 @@ public:
     /**
      * @brief AI model inference stub.
      *
-     * Replace the applyScale() call below with real inference output.
+     * Replace the applyScale() call below with real inference.
      * The applyScale() call MUST be retained (or equivalent inline logic)
      * to honour the CLEAN_PCM_SCALE contract.
      */
@@ -458,10 +459,13 @@ private:
  * @class I2SDriver
  * @brief Thin wrapper around ESP-IDF I2S driver for INMP441 capture.
  *
- * Design Doc 4.2 requirements honoured:
+ * Design Doc v1.2 §6 requirements honoured:
  *  - use_apll = true  -- mandatory for accurate 48 kHz clock generation
  *  - bits_per_sample = 32-bit -- produces BCLK = 64 x WS = 3.072 MHz
- *    (16-bit mode would give 32 x WS, wrong for INMP441)
+ *    (INMP441 requires BCLK = 64×WS, data is 24-bit in 32-bit slot)
+ *
+ * CRITICAL: I2S reads 32-bit samples, but INMP441 provides 24-bit data
+ * in the high 24 bits. We extract the high 16 bits for int16 PCM.
  */
 class I2SDriver {
 public:
@@ -469,12 +473,12 @@ public:
         i2s_config_t config = {
             .mode                 = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX),
             .sample_rate          = SAMPLE_RATE,                 // 48 000 Hz
-            .bits_per_sample      = I2S_BITS_PER_SAMPLE_32BIT,  // BCLK = 64 x WS
+            .bits_per_sample      = I2S_BITS_PER_SAMPLE_32BIT,  // BCLK = 64 x WS (REQUIRED)
             .channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT,
             .communication_format = I2S_COMM_FORMAT_STAND_I2S,
             .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
             .dma_buf_count        = 8,
-            .dma_buf_len          = FRAME_SIZE,
+            .dma_buf_len          = FRAME_SIZE,                  // 480 samples per DMA buffer
             .use_apll             = true,    // Required for 48 kHz accuracy
             .tx_desc_auto_clear   = false,
             .fixed_mclk           = 0
@@ -500,26 +504,55 @@ public:
         }
 
         i2s_zero_dma_buffer(I2S_NUM_0);
-        Serial.println("[I2S] Initialized at 48 kHz (APLL, BCLK = 3.072 MHz)");
+        Serial.println("[I2S] Initialized at 48 kHz (APLL, 32-bit mode, BCLK = 3.072 MHz)");
         return true;
     }
 
     /**
      * @brief Blocking read of one audio frame from I2S DMA.
+     *
+     * CRITICAL FIX v2.1.1: I2S is configured for 32-bit samples to meet
+     * INMP441 BCLK=64×WS requirement. However, the INMP441 outputs 24-bit
+     * data in the high 24 bits of the 32-bit slot. We extract the high
+     * 16 bits (bits 31:16) to get valid 16-bit PCM.
+     *
      * @param buffer     Destination -- must hold FRAME_SIZE int16 samples.
      * @param timeoutMs  Maximum wait time in milliseconds.
-     * @return           Bytes read, or 0 on error / timeout.
+     * @return           Bytes read (FRAME_SIZE * 2 on success), or 0 on error / timeout.
      */
     size_t read(int16_t* buffer, size_t timeoutMs = portMAX_DELAY) {
+        // I2S delivers 32-bit samples, but we need 16-bit PCM
+        // Use static buffer to avoid stack allocation in hot path
+        static int32_t dmaBuffer[FRAME_SIZE];
+
         size_t bytesRead = 0;
         esp_err_t err = i2s_read(I2S_NUM_0,
-                                 buffer,
-                                 sizeof(int16_t) * FRAME_SIZE,
+                                 dmaBuffer,                    // Read 32-bit samples
+                                 sizeof(int32_t) * FRAME_SIZE,
                                  &bytesRead,
                                  pdMS_TO_TICKS(timeoutMs));
-        if (err != ESP_OK || bytesRead == 0) return 0;
-        return bytesRead;
+
+        if (err != ESP_OK || bytesRead == 0) {
+            return 0;
+        }
+
+        // Convert 32-bit I2S data to 16-bit PCM
+        // INMP441 provides 24-bit data in high 24 bits of 32-bit slot
+        // We take the high 16 bits (bits 31:16) of each 32-bit sample
+        int samplesRead = bytesRead / sizeof(int32_t);
+        if (samplesRead > FRAME_SIZE) samplesRead = FRAME_SIZE;
+
+        for (int i = 0; i < samplesRead; i++) {
+            // Extract high 16 bits: shift right by 16
+            // This preserves the sign and gives us the upper 16 bits of the 24-bit data
+            buffer[i] = static_cast<int16_t>(dmaBuffer[i] >> 16);
+        }
+
+        return samplesRead * sizeof(int16_t);
     }
+
+private:
+    // No private members needed - using static local buffer in read()
 };
 
 // ============================================================================
@@ -658,8 +691,9 @@ void setup() {
     delay(1000);
 
     Serial.println("\n========================================");
-    Serial.println("  ESP32-S3 Audio Streamer  v2.1.0");
+    Serial.println("  ESP32-S3 Audio Streamer  v2.1.1");
     Serial.println("  clean_pcm scale: 0.8 (headroom mode)");
+    Serial.println("  I2S: 32-bit mode (BCLK=64xWS)");
     Serial.println("========================================");
 
     // WiFi
