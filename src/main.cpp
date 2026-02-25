@@ -81,7 +81,7 @@ namespace Config {
     // Network
     constexpr const char* WIFI_SSID = CONFIG_WIFI_SSID;
     constexpr const char* WIFI_PASS = CONFIG_WIFI_PASS;
-    constexpr const char* WS_HOST   = "192.168.1.14";
+    constexpr const char* WS_HOST   = CONFIG_WS_HOST;
     constexpr int         WS_PORT   = 8080;
     constexpr const char* WS_PATH   = "/";
 

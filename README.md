@@ -8,7 +8,7 @@
 flowchart TB
     subgraph ESP32["ESP32-S3 Hardware"]
         INMP441["INMP441<br/>MEMS Microphone<br/>(I2S Digital)"]
-        I2S["I2S Peripheral<br/>48kHz/16-bit"]
+        I2S["I2S Peripheral<br/>48kHz/32-bit"]
         CORE0["Core 0<br/>High Priority"]
         CORE1["Core 1<br/>Processing"]
     end
@@ -152,10 +152,10 @@ classDiagram
         +deinit() void
     }
     
-    class PassThroughProcessor {
+    class ScaledPassThroughProcessor  {
         +processFrame() float
         +getName() "PassThrough"
-        -- Zero latency --
+        -- Down scale 0.8 original input --
     }
     
     class AIModelProcessor {
